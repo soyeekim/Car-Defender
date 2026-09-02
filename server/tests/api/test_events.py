@@ -1,5 +1,6 @@
 import asyncio
 
+import app.db as appdb
 from app.sse.hub import hub
 
 
@@ -42,7 +43,7 @@ class SseProbe:
         self._task.cancel()
         try:
             await self._task
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
             pass
 
 
@@ -55,6 +56,14 @@ async def test_events_stream_connected_then_event(app, auth_headers, case_id):
     assert "event: case.updated" in await probe.next_frame()
     await probe.close()
     assert hub.subscriber_count(case_id) == 0
+
+
+async def test_events_stream_does_not_hold_db_session(app, auth_headers, case_id):
+    probe = await SseProbe(app, f"/api/v1/cases/{case_id}/events", auth_headers).start()
+    assert "event: connected" in await probe.next_frame()
+    # 스트림이 살아 있는 동안 커넥션 풀을 점유하면 안 된다
+    assert appdb.engine().pool.checkedout() == 0
+    await probe.close()
 
 
 async def test_events_accepts_query_token(app, auth_headers, case_id):
