@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.errors import ERROR_CATALOG, ApiError
 from app.ids import new_id
 from app.models import RefreshToken, User
-from app.schemas.auth import SignupRequest, UserOut
+from app.schemas.auth import AgreementOut, MeResponse, SignupRequest, UserOut
 from app.security import (
     create_access_token,
     generate_opaque_token,
@@ -17,6 +17,7 @@ from app.security import (
     hash_token,
     is_email,
     password_policy_ok,
+    verify_password,
 )
 
 REFRESH_COOKIE = "refresh_token"
@@ -117,3 +118,60 @@ def user_out(user: User) -> UserOut:
 
 def access_expires_in() -> int:
     return get_settings().access_token_minutes * 60
+
+
+async def login(db: AsyncSession, email: str, password: str) -> User:
+    user = await find_user_by_email(db, email) if is_email(email) else None
+    if user is None or not verify_password(password, user.password_hash):
+        raise ApiError(
+            "AUTH_INVALID_CREDENTIALS",
+            fields={"password": ERROR_CATALOG["AUTH_INVALID_CREDENTIALS"].message},
+        )
+    return user
+
+
+async def _find_refresh(db: AsyncSession, raw: str | None) -> RefreshToken | None:
+    if not raw:
+        return None
+    stmt = select(RefreshToken).where(RefreshToken.token_hash == hash_token(raw))
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def refresh_access(db: AsyncSession, raw: str | None) -> User:
+    if not raw:
+        raise ApiError("UNAUTHORIZED")
+    rt = await _find_refresh(db, raw)
+    if rt is None:
+        raise ApiError("UNAUTHORIZED")
+    now = now_utc()
+    expires = rt.expires_at if rt.expires_at.tzinfo else rt.expires_at.replace(tzinfo=now.tzinfo)
+    if rt.revoked_at is not None or expires < now:
+        raise ApiError("TOKEN_EXPIRED")
+    user = await db.get(User, rt.user_id)
+    if user is None:
+        raise ApiError("UNAUTHORIZED")
+    return user
+
+
+async def revoke_refresh(db: AsyncSession, raw: str | None) -> None:
+    rt = await _find_refresh(db, raw)
+    if rt is not None and rt.revoked_at is None:
+        rt.revoked_at = now_utc()
+        await db.commit()
+
+
+def me_response(user: User) -> MeResponse:
+    def ag(dt):
+        return AgreementOut(agreed=dt is not None, agreed_at=to_kst_iso(dt))
+
+    return MeResponse(
+        id=user.id,
+        email=user.email,
+        onboarded_at=to_kst_iso(user.onboarded_at),
+        is_demo=user.is_demo,
+        agreements={
+            "termsOfService": ag(user.agreed_terms_at),
+            "privacy": ag(user.agreed_privacy_at),
+            "videoConsent": ag(user.agreed_video_at),
+        },
+    )

@@ -33,3 +33,27 @@ async def client(app):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test/api/v1") as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _reset_limiter():
+    from app.ratelimit import limiter
+
+    limiter.reset()
+    yield
+    limiter.reset()
+
+
+SIGNUP_BODY = {
+    "email": "hyun@example.com",
+    "password": "carguard12",
+    "passwordConfirm": "carguard12",
+    "agreements": {"termsOfService": True, "privacy": True, "videoConsent": True},
+}
+
+
+@pytest.fixture
+async def auth_headers(client):
+    res = await client.post("/auth/signup", json=SIGNUP_BODY)
+    assert res.status_code == 201, res.text
+    return {"Authorization": f"Bearer {res.json()['accessToken']}"}
