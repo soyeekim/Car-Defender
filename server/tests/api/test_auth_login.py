@@ -115,6 +115,7 @@ async def test_login_rate_limited(client):
         await client.post("/auth/login", json={"email": "hyun@example.com", "password": "bad00000"})
     res = await client.post("/auth/login", json={"email": "hyun@example.com", "password": "bad00000"})
     assert res.status_code == 429
+    assert res.json()["error"]["code"] == "RATE_LIMITED"
 
 
 async def test_login_rate_limited_per_ip_across_different_emails(client):
@@ -128,5 +129,4 @@ async def test_login_rate_limited_per_ip_across_different_emails(client):
         "/auth/login", json={"email": "guess-final@example.com", "password": "bad00000"}
     )
     assert res.status_code == 429
-    assert res.json()["error"]["code"] == "RATE_LIMITED"
     assert res.json()["error"]["code"] == "RATE_LIMITED"

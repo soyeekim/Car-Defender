@@ -13,7 +13,10 @@ docker compose up -d db         # Postgres만
 .venv/Scripts/python -m uvicorn app.main:app --reload
 ```
 
-`DATABASE_URL`을 `sqlite+aiosqlite:///./data/dev.db`로 두면 Postgres 없이도 돈다.
+`db` 서비스는 호스트에 5432 포트를 열지 않는다(이유는 아래 배포 섹션 참고).
+호스트에서 바로 접속하려면 `DATABASE_URL=sqlite+aiosqlite:///./data/dev.db`로 두어
+Postgres 없이 돌리거나, `docker-compose.yml`의 `db` 서비스에 임시로
+`ports: ["127.0.0.1:5432:5432"]`를 추가한다.
 
 ## 테스트
 
