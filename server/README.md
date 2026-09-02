@@ -28,6 +28,12 @@ docker compose up -d --build
 curl localhost/api/v1/health
 ```
 
+`docker-compose.yml`의 `app`, `db` 서비스는 호스트에 포트를 열지 않는다. nginx가
+유일한 진입점이어야 레이트리밋(앱 프로세스 메모리 기준)과 `X-Forwarded-For` 기반
+접속 IP 신뢰가 의미를 가진다. 로컬에서 `psql`로 직접 DB에 붙어야 한다면
+`docker-compose.yml`의 `db` 서비스에 `ports: - "127.0.0.1:5432:5432"`처럼
+루프백에만 바인딩해서 임시로 연다.
+
 ## 환경 변수
 
 `.env.example` 참고. `AGENT_IMPL`은 `패키지.모듈:클래스` 형식으로 AI 담당 구현체를 가리킨다. 기본값은 `app.agent.mock:MockAgent`.

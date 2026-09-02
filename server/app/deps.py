@@ -27,7 +27,12 @@ async def current_user(
 
 
 def client_ip(request: Request) -> str:
+    # X-Forwarded-For 의 마지막 항목만 신뢰한다: 우리 nginx가 프록시로서
+    # 실제 접속 IP를 이 위치에 덧붙이므로, 앞쪽 항목은 클라이언트가 스스로
+    # 지어낸 값일 수 있어 레이트리밋 우회에 악용될 수 있다.
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
     return request.client.host if request.client else "unknown"

@@ -39,7 +39,11 @@ async def email_available(request: Request, email: str = Query(...), db: AsyncSe
 
 @router.post("/login", response_model=AuthResponse)
 async def login(body: LoginRequest, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
-    limiter.check(f"login:{client_ip(request)}:{body.email.lower()}", limit=10, per_seconds=60)
+    ip = client_ip(request)
+    # 이메일별 버킷만으로는 이메일을 바꿔가며 무한정 시도하는 것을 막지 못하므로,
+    # 같은 IP를 기준으로 한 더 넓은 버킷을 먼저 확인한다.
+    limiter.check(f"login-ip:{ip}", limit=30, per_seconds=60)
+    limiter.check(f"login:{ip}:{body.email.lower()}", limit=10, per_seconds=60)
     user = await auth_service.login(db, body.email, body.password)
     access, refresh = await auth_service.issue_tokens(db, user)
     auth_service.set_refresh_cookie(response, refresh)

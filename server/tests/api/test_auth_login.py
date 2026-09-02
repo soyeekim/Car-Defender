@@ -115,4 +115,18 @@ async def test_login_rate_limited(client):
         await client.post("/auth/login", json={"email": "hyun@example.com", "password": "bad00000"})
     res = await client.post("/auth/login", json={"email": "hyun@example.com", "password": "bad00000"})
     assert res.status_code == 429
+
+
+async def test_login_rate_limited_per_ip_across_different_emails(client):
+    # 이메일별 버킷(분당 10회)만 있으면 공격자가 이메일을 바꿔가며 무한정
+    # 시도할 수 있으므로, 같은 IP를 기준으로 한 더 넓은 버킷도 필요하다.
+    for i in range(30):
+        await client.post(
+            "/auth/login", json={"email": f"guess{i}@example.com", "password": "bad00000"}
+        )
+    res = await client.post(
+        "/auth/login", json={"email": "guess-final@example.com", "password": "bad00000"}
+    )
+    assert res.status_code == 429
+    assert res.json()["error"]["code"] == "RATE_LIMITED"
     assert res.json()["error"]["code"] == "RATE_LIMITED"

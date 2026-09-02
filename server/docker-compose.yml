@@ -7,8 +7,8 @@ services:
       POSTGRES_DB: cardefender
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    # nginx가 유일한 진입점이다. 로컬에서 psql로 직접 붙어야 하면
+    # "127.0.0.1:5432:5432" 처럼 루프백에만 바인딩해서 연다.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cardefender"]
       interval: 5s
@@ -26,8 +26,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - "8000:8000"
+    # 앱 포트를 호스트에 열지 않는다: nginx가 유일한 진입점이어야
+    # 레이트리밋(앱 내부 메모리 기준)과 접속 IP 신뢰가 의미를 가진다.
 
   nginx:
     image: nginx:1.27-alpine
