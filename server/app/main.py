@@ -8,6 +8,7 @@ from app import db
 from app.api import auth, health, legal, users
 from app.config import get_settings
 from app.errors import register_error_handlers
+from app.middleware import CatchAllErrorMiddleware
 
 
 @asynccontextmanager
@@ -27,6 +28,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="카-디펜더 API", version=settings.app_version, lifespan=lifespan)
     register_error_handlers(app)
+    app.add_middleware(CatchAllErrorMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,

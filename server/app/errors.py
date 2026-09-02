@@ -100,7 +100,19 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def _http(_: Request, exc: StarletteHTTPException):
-        mapping = {404: "NOT_FOUND", 405: "NOT_FOUND", 401: "UNAUTHORIZED", 403: "FORBIDDEN"}
+        mapping = {
+            400: "VALIDATION_FAILED",
+            401: "UNAUTHORIZED",
+            403: "FORBIDDEN",
+            404: "NOT_FOUND",
+            405: "NOT_FOUND",
+            409: "JOB_ALREADY_RUNNING",
+            413: "VALIDATION_FAILED",
+            415: "VALIDATION_FAILED",
+            416: "VALIDATION_FAILED",
+            422: "VALIDATION_FAILED",
+            429: "RATE_LIMITED",
+        }
         code = mapping.get(exc.status_code)
         if code is None:
             log.warning("unmapped HTTPException %s: %s", exc.status_code, exc.detail)
