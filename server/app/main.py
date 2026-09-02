@@ -8,6 +8,7 @@ from app import db
 from app.api import auth, cases, events, health, legal, messages, users
 from app.config import get_settings
 from app.errors import register_error_handlers
+from app.jobs.runner import runner
 from app.middleware import CatchAllErrorMiddleware
 
 
@@ -20,7 +21,9 @@ async def lifespan(app: FastAPI):
     db.configure_database(settings.database_url)
     if settings.app_env == "test":
         await db.create_all()
+    await runner.cleanup_stale()
     yield
+    await runner.wait_all()
     await db.dispose()
 
 

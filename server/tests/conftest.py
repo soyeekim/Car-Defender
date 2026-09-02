@@ -59,6 +59,14 @@ def _reset_hub():
     hub.reset()
 
 
+@pytest.fixture(autouse=True)
+async def _drain_jobs():
+    yield
+    from app.jobs.runner import runner
+
+    await runner.wait_all()
+
+
 SIGNUP_BODY = {
     "email": "hyun@example.com",
     "password": "carguard12",
