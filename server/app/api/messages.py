@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.deps import owned_case
 from app.models import Case, Message
+from app.schemas.chat import SendMessageRequest
+from app.services import chat as chat_service
 from app.services.presenters import message_dict
 
 router = APIRouter(prefix="/cases/{case_id}/messages", tags=["chat"])
@@ -31,3 +33,9 @@ async def list_messages(
         "hasMore": has_more,
         "nextCursor": rows[0].id if has_more and rows else None,
     }
+
+
+@router.post("", status_code=status.HTTP_202_ACCEPTED)
+async def send_message(body: SendMessageRequest, case: Case = Depends(owned_case), db: AsyncSession = Depends(get_db)) -> dict:
+    msg = await chat_service.send_user_message(db, case, body.text)
+    return {"message": message_dict(msg), "assistantPending": True}

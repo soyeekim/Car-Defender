@@ -76,6 +76,31 @@ async def _drain_jobs():
     await runner.reset()
 
 
+@pytest.fixture(autouse=True)
+def _reset_actions():
+    from app.services import actions
+
+    saved = dict(actions._registry)
+    yield
+    actions._registry.clear()
+    actions._registry.update(saved)
+
+
+@pytest.fixture
+def settle():
+    async def _settle():
+        from app.jobs.runner import runner
+        from app.services import chat
+
+        for _ in range(20):
+            await chat.wait_all()
+            await runner.wait_all()
+            await asyncio.sleep(0)
+            if not chat.pending() and not runner._tasks:
+                return
+    return _settle
+
+
 SIGNUP_BODY = {
     "email": "hyun@example.com",
     "password": "carguard12",
