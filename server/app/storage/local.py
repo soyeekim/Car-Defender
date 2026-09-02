@@ -1,4 +1,5 @@
 import asyncio
+import os
 import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,16 +14,18 @@ class LocalStorage:
 
     def _path(self, key: str) -> Path:
         validate_key(key)
-        p = (self.root / key).resolve()
-        if not p.is_relative_to(self.root.resolve()):
+        root = os.path.normpath(os.path.abspath(self.root))
+        p = os.path.normpath(os.path.join(root, key))
+        if not (p == root or p.startswith(root + os.sep)):
             raise ValueError(f"잘못된 스토리지 키: {key!r}")
-        return p
+        return Path(p)
 
     async def put_file(self, key: str, src_path: Path) -> int:
         dst = self._path(key)
         dst.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(shutil.copyfile, src_path, dst)
-        return dst.stat().st_size
+        st = await asyncio.to_thread(dst.stat)
+        return st.st_size
 
     async def put_bytes(self, key: str, data: bytes) -> int:
         dst = self._path(key)
@@ -71,8 +74,10 @@ class LocalStorage:
         probe = self.root / ".health"
         try:
             self.root.mkdir(parents=True, exist_ok=True)
-            probe.write_text("ok")
-            probe.read_text()
+            with open(probe, "w") as f:
+                f.write("ok")
+            with open(probe) as f:
+                f.read()
             return True
         except OSError:
             return False

@@ -1,3 +1,6 @@
+import builtins
+import os
+
 import pytest
 
 from app.storage import get_storage, reset_storage
@@ -59,6 +62,21 @@ def test_local_storage_healthy_false_when_root_is_a_file(tmp_path):
     file_path = tmp_path / "not_a_dir"
     file_path.write_text("x")
     st = LocalStorage(file_path)
+    assert st.healthy() is False
+
+
+def test_local_storage_healthy_false_when_probe_write_fails(tmp_path, monkeypatch):
+    st = LocalStorage(tmp_path / "store")
+    probe = tmp_path / "store" / ".health"
+    real_open = builtins.open
+
+    def boom_open(path, mode="r", *args, **kwargs):
+        if os.fspath(path) == os.fspath(probe) and "w" in mode:
+            raise OSError("boom")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", boom_open)
+
     assert st.healthy() is False
 
 
