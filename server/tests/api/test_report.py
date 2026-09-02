@@ -78,6 +78,45 @@ async def test_pdf_create_idempotent_and_download(client, auth_headers, judged_c
     assert versions["items"][0]["hasPdf"] is True
 
 
+async def test_pdf_create_race_returns_existing_pdf(client, auth_headers, judged_case, settle):
+    from app.clock import now_utc
+    from app.db import session_scope
+    from app.ids import new_id
+    from app.models import Case, ReportPdf
+    from app.services import report as report_service
+
+    await client.post(f"/cases/{judged_case}/report", headers=auth_headers)
+    await settle()
+
+    async with session_scope() as db:
+        report = await report_service.report_by_version(db, judged_case, "latest")
+        case = await db.get(Case, judged_case)
+        winner = ReportPdf(
+            id=new_id(), report_id=report.id, storage_key=f"pdfs/{judged_case}/{report.id}.pdf",
+            filename="이미_있는.pdf", size_bytes=42, created_at=now_utc(),
+        )
+        db.add(winner)
+        await db.commit()
+
+        original_pdf_for = report_service.pdf_for
+        calls = {"n": 0}
+
+        async def fake_pdf_for(db_, report_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None  # 첫 조회 시점엔 아직 없었던 것처럼 흉내낸다
+            return await original_pdf_for(db_, report_id)
+
+        report_service.pdf_for = fake_pdf_for
+        try:
+            result_pdf, created = await report_service.ensure_pdf(db, case, report)
+        finally:
+            report_service.pdf_for = original_pdf_for
+
+    assert created is False
+    assert result_pdf.id == winner.id
+
+
 async def test_chat_create_report_action(client, auth_headers, judged_case, settle):
     await client.post(f"/cases/{judged_case}/messages", json={"text": "사건경위서 만들어 주세요"}, headers=auth_headers)
     await settle()

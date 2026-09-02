@@ -1,4 +1,5 @@
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clock import kst_date_label, now_utc, to_kst_iso
@@ -99,20 +100,32 @@ async def draft_card(db: AsyncSession, case_id: str) -> Message | None:
 
 
 async def ensure_pdf(db: AsyncSession, case: Case, report: Report) -> tuple[ReportPdf, bool]:
-    existing = await pdf_for(db, report.id)
+    # report_id를 미리 뽑아 둔다: rollback은 세션의 객체를 모두 expire시키므로,
+    # rollback 이후 report.id에 접근하면 동기 지연로딩이 걸려 MissingGreenlet이 난다.
+    report_id = report.id
+    existing = await pdf_for(db, report_id)
     if existing is not None:
         return existing, False
     data, pages = render_report_pdf(
         case_title=case.title, date_label=kst_date_label(report.created_at),
         version_label=ordinal_label(report.version), sections=report.sections, disclaimer=DISCLAIMER,
     )
-    key = f"pdfs/{case.id}/{report.id}.pdf"
+    key = f"pdfs/{case.id}/{report_id}.pdf"
     size = await get_storage().put_bytes(key, data)
-    pdf = ReportPdf(id=new_id(), report_id=report.id, storage_key=key, filename=report_pdf_filename(case.title, report.created_at), size_bytes=size, created_at=now_utc())
+    pdf = ReportPdf(id=new_id(), report_id=report_id, storage_key=key, filename=report_pdf_filename(case.title, report.created_at), size_bytes=size, created_at=now_utc())
     db.add(pdf)
     if report.page_count != pages:
         report.page_count = pages
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # 동시에 두 요청이 같은 버전의 PDF를 만들면 report_id 유니크 제약이 걸린다.
+        # 진 쪽은 자기 것을 버리고 먼저 커밋된 PDF를 그대로 돌려준다.
+        await db.rollback()
+        existing = await pdf_for(db, report_id)
+        if existing is not None:
+            return existing, False
+        raise
     return pdf, True
 
 
