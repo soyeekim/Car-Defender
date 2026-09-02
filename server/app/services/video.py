@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -20,6 +21,8 @@ from app.security import create_stream_token
 from app.services import cases as case_service
 from app.services.presenters import size_label
 from app.storage import get_storage
+
+log = logging.getLogger(__name__)
 
 EXT_BY_MIME = {"video/mp4": "mp4", "video/quicktime": "mov", "video/x-msvideo": "avi"}
 
@@ -87,18 +90,20 @@ async def upload_video(db: AsyncSession, case: Case, upload: UploadFile) -> tupl
     video_id = new_id()
     key = video_key(case.id, video_id, mime)
 
-    with tempfile.NamedTemporaryFile(suffix=f".{EXT_BY_MIME.get(mime, 'mp4')}", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-        await asyncio.to_thread(shutil.copyfileobj, upload.file, tmp, 1024 * 1024)
+    tmp = tempfile.NamedTemporaryFile(suffix=f".{EXT_BY_MIME.get(mime, 'mp4')}", delete=False)
+    tmp_path = Path(tmp.name)
     try:
+        await asyncio.to_thread(shutil.copyfileobj, upload.file, tmp, 1024 * 1024)
+        tmp.close()
         duration_sec, recorded_at = await asyncio.to_thread(probe_video, tmp_path)
         size = await get_storage().put_file(key, tmp_path)
     finally:
+        tmp.close()
         tmp_path.unlink(missing_ok=True)
 
     old = await case_service.get_video(db, case.id)
+    old_key = old.storage_key if old is not None else None
     if old is not None:
-        await get_storage().delete(old.storage_key)
         await db.delete(old)
         await db.flush()
 
@@ -110,6 +115,12 @@ async def upload_video(db: AsyncSession, case: Case, upload: UploadFile) -> tupl
     db.add(video)
     case_service.touch(case)
     await db.commit()
+
+    if old_key is not None:
+        try:
+            await get_storage().delete(old_key)
+        except Exception:
+            log.exception("교체된 영상 스토리지 정리 실패: %s", old_key)
 
     await case_service.add_message(db, case.id, "user", "video_attachment", attachment_payload(video))
 

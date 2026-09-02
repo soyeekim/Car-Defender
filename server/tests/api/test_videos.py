@@ -93,3 +93,82 @@ async def test_delete_case_removes_video_file(client, auth_headers, case_id, upl
 
     with pytest.raises(FileNotFoundError):
         await get_storage().size(key)
+
+
+async def test_upload_copy_failure_removes_temp_file(client, auth_headers, case_id, monkeypatch):
+    import tempfile
+    from pathlib import Path
+
+    from app.services import video as video_service
+
+    recorded: list[str] = []
+    orig_ntf = tempfile.NamedTemporaryFile
+
+    def _spy_ntf(*args, **kwargs):
+        f = orig_ntf(*args, **kwargs)
+        recorded.append(f.name)
+        return f
+
+    def _boom(*args, **kwargs):
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(video_service.tempfile, "NamedTemporaryFile", _spy_ntf)
+    monkeypatch.setattr(video_service.shutil, "copyfileobj", _boom)
+
+    files = {"file": ("blackbox_0822.mp4", b"\x00" * 2048, "video/mp4")}
+    res = await client.post(f"/cases/{case_id}/videos", files=files, headers=auth_headers)
+    assert res.status_code == 500
+    assert res.json()["error"]["code"] == "INTERNAL_ERROR"
+
+    assert recorded, "temp file should have been created before the copy failure"
+    for path in recorded:
+        assert not Path(path).exists()
+
+
+async def test_upload_replace_deletes_old_storage_after_commit(client, auth_headers, case_id, upload, monkeypatch):
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import Video
+    from app.storage import get_storage
+
+    v1 = (await upload(filename="a.mp4")).json()["video"]["id"]
+
+    storage = get_storage()
+    orig_delete = storage.delete
+    captured: dict = {}
+
+    async def _spy_delete(key):
+        async with session_scope() as db:
+            row = (await db.execute(select(Video).where(Video.case_id == case_id))).scalar_one_or_none()
+            captured["visible_id"] = row.id if row else None
+        await orig_delete(key)
+
+    monkeypatch.setattr(storage, "delete", _spy_delete)
+
+    v2 = (await upload(filename="b.mp4")).json()["video"]["id"]
+
+    assert v1 != v2
+    assert captured["visible_id"] == v2
+
+
+async def test_delete_case_removes_storage_after_commit(client, auth_headers, case_id, upload, monkeypatch):
+    from app.db import session_scope
+    from app.models import Case
+    from app.storage import get_storage
+
+    await upload()
+
+    storage = get_storage()
+    orig_delete = storage.delete
+    captured: dict = {}
+
+    async def _spy_delete(key):
+        async with session_scope() as db:
+            captured["case_exists"] = (await db.get(Case, case_id)) is not None
+        await orig_delete(key)
+
+    monkeypatch.setattr(storage, "delete", _spy_delete)
+
+    assert (await client.delete(f"/cases/{case_id}", headers=auth_headers)).status_code == 204
+    assert captured.get("case_exists") is False

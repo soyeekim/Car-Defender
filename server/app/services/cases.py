@@ -1,3 +1,5 @@
+import logging
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +22,8 @@ from app.models import (
 )
 from app.services.presenters import CaseBundle, case_detail, message_dict
 from app.sse.hub import hub
+
+log = logging.getLogger(__name__)
 
 
 async def get_owned_case(db: AsyncSession, user: User, case_id: str) -> Case:
@@ -66,15 +70,24 @@ async def delete_case(db: AsyncSession, case: Case) -> None:
 
     case_id = case.id
     storage = get_storage()
+    keys: list[str] = []
     video = await get_video(db, case_id)
     if video is not None:
-        await storage.delete(video.storage_key)
+        keys.append(video.storage_key)
     for report in (await db.execute(select(Report).where(Report.case_id == case_id))).scalars().all():
         pdf = (await db.execute(select(ReportPdf).where(ReportPdf.report_id == report.id))).scalar_one_or_none()
         if pdf is not None:
-            await storage.delete(pdf.storage_key)
+            keys.append(pdf.storage_key)
+
     await db.delete(case)
     await db.commit()
+
+    for key in keys:
+        try:
+            await storage.delete(key)
+        except Exception:
+            log.exception("사건 삭제 후 스토리지 정리 실패: %s (case %s)", key, case_id)
+
     hub.drop(case_id)  # 남은 버퍼와 구독자 정리
 
 
