@@ -1180,7 +1180,8 @@ async def test_send_blocked_while_analysis_running(client, auth_headers, case_id
     await settle()
 
 
-async def test_unregistered_action_is_noop_and_api_error_becomes_text_card(client, auth_headers, case_id, upload, settle, monkeypatch):
+async def test_unregistered_action_is_noop_and_api_error_becomes_text_card(client, auth_headers, case_id, settle, monkeypatch):
+    # 영상을 올리지 않는다: 영상이 있고 분석이 없으면 chat 대신 분석 Job이 돌기 때문 (§1.1 ②′)
     from app.agent.base import ChatResult
     from app.agent.loader import get_agent
     from app.errors import ApiError
@@ -1194,15 +1195,13 @@ async def test_unregistered_action_is_noop_and_api_error_becomes_text_card(clien
         raise ApiError("REPORT_VERDICT_REQUIRED")
 
     register_action("create_report", failing)
-    await upload()
-    await settle()
     await send(client, auth_headers, case_id, "경위서")
     await settle()
     msgs = (await client.get(f"/cases/{case_id}/messages", headers=auth_headers)).json()["items"]
     assert msgs[-1]["payload"]["text"] == "과실비율 판정이 끝나면 경위서를 만들 수 있어요."
 
 
-async def test_rebuttal_locked_error_becomes_locked_card(client, auth_headers, case_id, upload, settle, monkeypatch):
+async def test_rebuttal_locked_error_becomes_locked_card(client, auth_headers, case_id, settle, monkeypatch):
     from app.agent.base import ChatResult
     from app.agent.loader import get_agent
     from app.errors import ApiError
@@ -1216,8 +1215,6 @@ async def test_rebuttal_locked_error_becomes_locked_card(client, auth_headers, c
         raise ApiError("REBUTTAL_LOCKED", fields={"missing": "verdict,report"})
 
     register_action("create_rebuttal", locked)
-    await upload()
-    await settle()
     await send(client, auth_headers, case_id, "반박")
     await settle()
     msgs = (await client.get(f"/cases/{case_id}/messages", headers=auth_headers)).json()["items"]
@@ -1226,15 +1223,13 @@ async def test_rebuttal_locked_error_becomes_locked_card(client, auth_headers, c
     assert card["payload"]["buttonHint"] == "경위서를 만들면 열려요"
 
 
-async def test_agent_crash_sends_internal_error_text(client, auth_headers, case_id, upload, settle, monkeypatch):
+async def test_agent_crash_sends_internal_error_text(client, auth_headers, case_id, settle, monkeypatch):
     from app.agent.loader import get_agent
 
     async def chat(inp):
         raise RuntimeError("llm down")
 
     monkeypatch.setattr(get_agent()._impl, "chat", chat)
-    await upload()
-    await settle()
     await send(client, auth_headers, case_id, "hi")
     await settle()
     msgs = (await client.get(f"/cases/{case_id}/messages", headers=auth_headers)).json()["items"]
