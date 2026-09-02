@@ -136,3 +136,104 @@ async def test_agent_crash_sends_internal_error_text(client, auth_headers, case_
     await settle()
     msgs = (await client.get(f"/cases/{case_id}/messages", headers=auth_headers)).json()["items"]
     assert msgs[-1]["payload"]["text"].startswith("잠시 후 다시 시도해 주세요")
+
+
+async def test_flush_failure_rolls_back_and_still_sends_error_card(client, auth_headers, case_id, upload, settle, monkeypatch):
+    from sqlalchemy import insert
+
+    import app.services.chat as chat_module
+    from app.agent.base import ChatResult
+    from app.agent.loader import get_agent
+    from app.clock import now_utc
+    from app.errors import ERROR_CATALOG
+    from app.models import Analysis
+
+    # 영상만 올리면 analysis Job이 아직 안 돈다: Analysis가 생기려면 설명 메시지가 먼저 필요하다.
+    await send(client, auth_headers, case_id, "교차로에서 오토바이가 박았어요")
+    await settle()
+    await upload()
+    await settle()  # 분석 Job이 끝나 Analysis 행이 이미 존재한다
+
+    async def chat(inp):
+        return ChatResult(reply="네, 확인했어요.")
+
+    monkeypatch.setattr(get_agent()._impl, "chat", chat)
+
+    async def broken_merge_facts(db, cid, updates):
+        # case_id가 이미 있는 Analysis에 같은 PK로 하나 더 INSERT해 flush에서 터뜨린다.
+        # ORM add()는 세션 identity map과 충돌해 SAWarning을 내므로 Core insert로 우회한다.
+        now = now_utc()
+        await db.execute(insert(Analysis).values(case_id=cid, summary_text="dup", facts={}, questions=[], created_at=now, updated_at=now))
+        await db.flush()
+
+    monkeypatch.setattr(chat_module, "merge_facts", broken_merge_facts)
+
+    await send(client, auth_headers, case_id, "우측 앞펜더요.")
+    await settle()
+    msgs = (await client.get(f"/cases/{case_id}/messages", headers=auth_headers)).json()["items"]
+    assert msgs[-1]["payload"]["text"] == ERROR_CATALOG["INTERNAL_ERROR"].message
+
+
+async def test_chat_timeout_sends_internal_error_card(client, auth_headers, case_id, upload, settle, monkeypatch):
+    import asyncio
+
+    from app.agent.loader import get_agent
+    from app.config import get_settings
+    from app.errors import ERROR_CATALOG
+
+    # 영상만 올리면 analysis Job이 아직 안 돈다: Analysis가 생기려면 설명 메시지가 먼저 필요하다.
+    await send(client, auth_headers, case_id, "교차로에서 오토바이가 박았어요")
+    await settle()
+    await upload()
+    await settle()
+
+    monkeypatch.setattr(get_settings(), "job_timeout_seconds", 0.05)
+
+    async def slow_chat(inp):
+        await asyncio.sleep(1)
+        raise AssertionError("timeout이 이 지점 전에 취소했어야 해요")
+
+    monkeypatch.setattr(get_agent()._impl, "chat", slow_chat)
+
+    await send(client, auth_headers, case_id, "우측 앞펜더요.")
+    await settle()
+    msgs = (await client.get(f"/cases/{case_id}/messages", headers=auth_headers)).json()["items"]
+    assert msgs[-1]["payload"]["text"] == ERROR_CATALOG["INTERNAL_ERROR"].message
+
+
+async def test_chat_wait_all_with_timeout_cancels_stuck_task():
+    import asyncio
+
+    from app.services import chat as chat_module
+
+    async def stuck():
+        await asyncio.sleep(10)
+
+    task = asyncio.create_task(stuck())
+    chat_module._tasks.add(task)
+    task.add_done_callback(chat_module._tasks.discard)
+
+    await chat_module.wait_all(timeout=0.05)
+
+    assert task.cancelled()
+    assert task not in chat_module._tasks
+
+
+async def test_rebuttal_locked_missing_entries_are_stripped(client, auth_headers, case_id, settle, monkeypatch):
+    from app.agent.base import ChatResult
+    from app.agent.loader import get_agent
+    from app.errors import ApiError
+
+    async def chat(inp):
+        return ChatResult(reply="반박 준비", next_action="create_rebuttal")
+
+    monkeypatch.setattr(get_agent()._impl, "chat", chat)
+
+    async def locked(db, case):
+        raise ApiError("REBUTTAL_LOCKED", fields={"missing": " verdict , report "})
+
+    register_action("create_rebuttal", locked)
+    await send(client, auth_headers, case_id, "반박")
+    await settle()
+    msgs = (await client.get(f"/cases/{case_id}/messages", headers=auth_headers)).json()["items"]
+    assert msgs[-1]["payload"]["missing"] == ["verdict", "report"]

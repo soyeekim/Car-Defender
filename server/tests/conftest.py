@@ -71,9 +71,12 @@ def _reset_hub():
 async def _drain_jobs():
     yield
     from app.jobs.runner import runner
+    from app.services import chat
 
     await runner.wait_all()
     await runner.reset()
+    await chat.wait_all()
+    await chat.reset()
 
 
 @pytest.fixture(autouse=True)
@@ -98,6 +101,7 @@ def settle():
             await asyncio.sleep(0)
             if not chat.pending() and not runner._tasks:
                 return
+        pytest.fail("background work did not drain")
     return _settle
 
 

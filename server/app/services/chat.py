@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.base import ChatInput
 from app.agent.loader import get_agent
+from app.config import get_settings
 from app.content.texts import REBUTTAL_LOCKED_CARD, UPLOAD_CTA
 from app.db import session_scope
 from app.errors import ERROR_CATALOG, ApiError
@@ -26,9 +27,29 @@ def pending() -> int:
     return len(_tasks)
 
 
-async def wait_all() -> None:
-    while _tasks:
-        await asyncio.gather(*list(_tasks), return_exceptions=True)
+async def wait_all(timeout: float | None = None) -> None:
+    if timeout is None:
+        while _tasks:
+            await asyncio.gather(*list(_tasks), return_exceptions=True)
+        return
+    tasks = list(_tasks)
+    if not tasks:
+        return
+    _, still_pending = await asyncio.wait(tasks, timeout=timeout)
+    for task in still_pending:
+        task.cancel()
+    if still_pending:
+        await asyncio.gather(*still_pending, return_exceptions=True)
+
+
+async def reset() -> None:
+    tasks = list(_tasks)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _tasks.clear()
+    _locks.clear()
 
 
 async def send_user_message(db: AsyncSession, case: Case, text: str) -> Message:
@@ -54,10 +75,25 @@ async def process_user_message(case_id: str, message_id: str) -> None:
                 await _process(db, case_id, message_id)
             except Exception:  # noqa: BLE001
                 log.exception("chat processing failed for case %s", case_id)
-                try:
-                    await _assistant_text(db, case_id, ERROR_CATALOG["INTERNAL_ERROR"].message)
-                except Exception:  # noqa: BLE001
-                    log.exception("could not even send the error card")
+                await _send_error_card(db, case_id)
+
+
+async def _send_error_card(db: AsyncSession, case_id: str) -> None:
+    # 실패한 세션은 이미 무효화된 트랜잭션을 물고 있을 수 있어 먼저 되돌린다.
+    try:
+        await db.rollback()
+    except Exception:  # noqa: BLE001
+        log.exception("rollback failed after chat processing error for case %s", case_id)
+    try:
+        await _assistant_text(db, case_id, ERROR_CATALOG["INTERNAL_ERROR"].message)
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("error card failed on the original session for case %s", case_id)
+    try:
+        async with session_scope() as fresh_db:
+            await _assistant_text(fresh_db, case_id, ERROR_CATALOG["INTERNAL_ERROR"].message)
+    except Exception:  # noqa: BLE001
+        log.exception("could not even send the error card for case %s", case_id)
 
 
 async def _process(db: AsyncSession, case_id: str, message_id: str) -> None:
@@ -75,15 +111,18 @@ async def _process(db: AsyncSession, case_id: str, message_id: str) -> None:
 
     new_msg = await db.get(Message, message_id)
     verdict = await case_service.active_verdict(db, case_id)
-    result = await get_agent().chat(ChatInput(
-        messages=await recent_turns(db, case_id, exclude_id=message_id),
-        new_message=new_msg.payload.get("text", "") if new_msg else "",
-        facts=analysis.facts if analysis else {},
-        questions=analysis.questions if analysis else [],
-        verdict=snapshot(verdict),
-        has_video=video is not None,
-        has_report=await case_service.latest_report(db, case_id) is not None,
-    ))
+    result = await asyncio.wait_for(
+        get_agent().chat(ChatInput(
+            messages=await recent_turns(db, case_id, exclude_id=message_id),
+            new_message=new_msg.payload.get("text", "") if new_msg else "",
+            facts=analysis.facts if analysis else {},
+            questions=analysis.questions if analysis else [],
+            verdict=snapshot(verdict),
+            has_video=video is not None,
+            has_report=await case_service.latest_report(db, case_id) is not None,
+        )),
+        timeout=get_settings().job_timeout_seconds,
+    )
     await merge_facts(db, case_id, result.fact_updates)
     await _assistant_text(db, case_id, result.reply)
 
@@ -97,7 +136,7 @@ async def _process(db: AsyncSession, case_id: str, message_id: str) -> None:
     except ApiError as e:
         if e.code == "REBUTTAL_LOCKED":
             missing = (e.fields or {}).get("missing", "report")
-            payload = {**REBUTTAL_LOCKED_CARD, "missing": [m for m in str(missing).split(",") if m]}
+            payload = {**REBUTTAL_LOCKED_CARD, "missing": [m.strip() for m in str(missing).split(",") if m.strip()]}
             await case_service.add_message(db, case_id, "assistant", "rebuttal_locked", payload)
         else:
             await _assistant_text(db, case_id, e.message or ERROR_CATALOG[e.code].message)
