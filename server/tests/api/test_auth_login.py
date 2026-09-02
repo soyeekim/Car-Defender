@@ -31,6 +31,23 @@ async def test_login_wrong_password_and_unknown_email_look_same(client):
     assert a.json()["error"]["fields"] == {"password": "이메일 또는 비밀번호가 맞지 않아요. 다시 입력해 주세요."}
 
 
+async def test_login_unknown_email_still_verifies_a_password_hash(client, monkeypatch):
+    import app.services.auth as auth_service
+
+    await signup(client)
+    calls = []
+    original = auth_service.verify_password
+
+    def counting_verify(raw, hashed):
+        calls.append((raw, hashed))
+        return original(raw, hashed)
+
+    monkeypatch.setattr(auth_service, "verify_password", counting_verify)
+    res = await client.post("/auth/login", json={"email": "ghost@example.com", "password": "nope1234"})
+    assert res.status_code == 401
+    assert len(calls) == 1
+
+
 async def test_me_requires_bearer(client):
     res = await client.get("/auth/me")
     assert res.status_code == 401

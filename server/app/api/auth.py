@@ -13,6 +13,7 @@ from app.schemas.auth import (
     RefreshResponse,
     SignupRequest,
 )
+from app.security import create_access_token
 from app.services import auth as auth_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -48,8 +49,6 @@ async def refresh(
     db: AsyncSession = Depends(get_db),
 ):
     user = await auth_service.refresh_access(db, refresh_token)
-    from app.security import create_access_token
-
     return RefreshResponse(access_token=create_access_token(user.id), expires_in=auth_service.access_expires_in())
 
 

@@ -120,9 +120,14 @@ def access_expires_in() -> int:
     return get_settings().access_token_minutes * 60
 
 
+_DUMMY_HASH = hash_password("cardefender-dummy-password-0")
+
+
 async def login(db: AsyncSession, email: str, password: str) -> User:
     user = await find_user_by_email(db, email) if is_email(email) else None
-    if user is None or not verify_password(password, user.password_hash):
+    hashed = user.password_hash if user is not None else _DUMMY_HASH
+    ok = verify_password(password, hashed)
+    if user is None or not ok:
         raise ApiError(
             "AUTH_INVALID_CREDENTIALS",
             fields={"password": ERROR_CATALOG["AUTH_INVALID_CREDENTIALS"].message},
