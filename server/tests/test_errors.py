@@ -141,6 +141,26 @@ async def test_500_response_carries_cors_headers(app, client):
     assert res.json()["error"]["code"] == "INTERNAL_ERROR"
 
 
+async def test_streaming_response_raising_after_start_does_not_hang(app, client):
+    from starlette.responses import StreamingResponse
+
+    router = APIRouter()
+
+    @router.get("/stream-crash")
+    async def stream_crash():
+        async def gen():
+            yield b"chunk-1"
+            raise RuntimeError("boom mid-stream")
+
+        return StreamingResponse(gen(), media_type="text/plain")
+
+    app.include_router(router, prefix="/api/v1")
+    client._transport.raise_app_exceptions = False
+    res = await client.get("/stream-crash")
+    assert res.status_code == 200
+    assert res.content == b"chunk-1"
+
+
 async def test_http_unknown_5xx_maps_to_internal_error(app, client):
     from starlette.exceptions import HTTPException as StarletteHTTPException
 
