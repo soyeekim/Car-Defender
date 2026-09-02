@@ -1,14 +1,15 @@
+import logging
 from datetime import timedelta
 
 from fastapi import Response
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clock import now_utc, to_kst_iso
 from app.config import get_settings
 from app.errors import ERROR_CATALOG, ApiError
 from app.ids import new_id
-from app.mail import MailMessage, get_mailer
+from app.mail import MailMessage, MailSendError, get_mailer
 from app.models import PasswordResetToken, RefreshToken, User
 from app.schemas.auth import AgreementOut, MeResponse, SignupRequest, UserOut
 from app.security import (
@@ -20,6 +21,8 @@ from app.security import (
     password_policy_ok,
     verify_password,
 )
+
+log = logging.getLogger(__name__)
 
 REFRESH_COOKIE = "refresh_token"
 REFRESH_COOKIE_PATH = "/api/v1/auth"
@@ -110,7 +113,14 @@ def set_refresh_cookie(response: Response, raw: str) -> None:
 
 
 def clear_refresh_cookie(response: Response) -> None:
-    response.delete_cookie(REFRESH_COOKIE, path=REFRESH_COOKIE_PATH)
+    settings = get_settings()
+    response.delete_cookie(
+        REFRESH_COOKIE,
+        path=REFRESH_COOKIE_PATH,
+        httponly=True,
+        secure=settings.is_prod,
+        samesite="lax",
+    )
 
 
 def user_out(user: User) -> UserOut:
@@ -209,7 +219,10 @@ async def request_password_reset(db: AsyncSession, email: str) -> None:
         f"{link}\n\n"
         "본인이 요청하지 않았다면 이 메일은 무시해도 돼요."
     )
-    await get_mailer().send(MailMessage(to=user.email, subject="[카-디펜더] 비밀번호 재설정", body_text=body))
+    try:
+        await get_mailer().send(MailMessage(to=user.email, subject="[카-디펜더] 비밀번호 재설정", body_text=body))
+    except MailSendError:
+        log.exception("password reset mail send failed for user_id=%s", user.id)
 
 
 async def confirm_password_reset(db: AsyncSession, token: str, password: str, confirm: str) -> None:
@@ -230,4 +243,10 @@ async def confirm_password_reset(db: AsyncSession, token: str, password: str, co
         raise ApiError("RESET_TOKEN_INVALID")
     user.password_hash = hash_password(password)
     prt.used_at = now
+    revoke_stmt = (
+        update(RefreshToken)
+        .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    await db.execute(revoke_stmt)
     await db.commit()

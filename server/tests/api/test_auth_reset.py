@@ -48,6 +48,34 @@ async def test_reset_confirm_changes_password_once(client):
     assert again.json()["error"]["code"] == "RESET_TOKEN_INVALID"
 
 
+async def test_reset_request_still_202_when_mail_send_fails(client, monkeypatch):
+    from app.mail.base import MailSendError
+
+    await client.post("/auth/signup", json=SIGNUP_BODY)
+
+    async def boom(msg):
+        raise MailSendError("smtp down")
+
+    monkeypatch.setattr(get_mailer(), "send", boom)
+    res = await client.post("/auth/password-reset", json={"email": "hyun@example.com"})
+    assert res.status_code == 202
+    assert res.json() == {"message": "비밀번호 재설정 링크를 보냈어요. 메일함을 확인해 주세요."}
+
+
+async def test_reset_confirm_revokes_existing_refresh_tokens(client):
+    signup_res = await client.post("/auth/signup", json=SIGNUP_BODY)
+    old_refresh_cookie = signup_res.cookies.get("refresh_token")
+    await client.post("/auth/password-reset", json={"email": "hyun@example.com"})
+    token = get_mailer().sent[0].body_text.split("reset?token=")[1].split()[0]
+
+    res = await client.post("/auth/password-reset/confirm", json={"token": token, "password": "newpass2026", "passwordConfirm": "newpass2026"})
+    assert res.status_code == 200
+
+    res = await client.post("/auth/refresh", cookies={"refresh_token": old_refresh_cookie})
+    assert res.status_code == 401
+    assert res.json()["error"]["code"] == "TOKEN_EXPIRED"
+
+
 async def test_reset_confirm_policy_and_mismatch(client):
     await client.post("/auth/signup", json=SIGNUP_BODY)
     await client.post("/auth/password-reset", json={"email": "hyun@example.com"})

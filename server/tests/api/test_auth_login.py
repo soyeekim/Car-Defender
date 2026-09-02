@@ -89,10 +89,22 @@ async def test_refresh_without_cookie(client):
 
 
 async def test_logout_revokes_refresh(client):
-    token = (await signup(client)).json()["accessToken"]
+    signup_res = await signup(client)
+    token = signup_res.json()["accessToken"]
+    old_refresh_cookie = client.cookies.get("refresh_token")
     res = await client.post("/auth/logout", headers={"Authorization": f"Bearer {token}"})
     assert res.status_code == 204
+    set_cookie = res.headers["set-cookie"]
+    assert "refresh_token=" in set_cookie
+    assert "max-age=0" in set_cookie.lower()
+
+    # httpx가 방금 지운 쿠키를 더 이상 보관하지 않으므로 쿠키 없이 요청하면 UNAUTHORIZED
     res = await client.post("/auth/refresh")
+    assert res.status_code == 401
+    assert res.json()["error"]["code"] == "UNAUTHORIZED"
+
+    # 지워지기 전 쿠키 값을 재사용해도 이미 revoke된 토큰이라 TOKEN_EXPIRED
+    res = await client.post("/auth/refresh", cookies={"refresh_token": old_refresh_cookie})
     assert res.status_code == 401
     assert res.json()["error"]["code"] == "TOKEN_EXPIRED"
 
