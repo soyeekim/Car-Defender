@@ -1,6 +1,11 @@
+import asyncio
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
+
+KST = timezone(timedelta(hours=9))
 
 
 @pytest.fixture
@@ -91,3 +96,62 @@ async def case_id(client, auth_headers):
     res = await client.post("/cases", headers=auth_headers)
     assert res.status_code == 201, res.text
     return res.json()["id"]
+
+
+@pytest.fixture(autouse=True)
+def fake_probe(monkeypatch):
+    from app.services import video as video_service
+
+    monkeypatch.setattr(video_service, "probe_video", lambda path: (42, datetime(2026, 8, 22, 14, 2, 17, tzinfo=KST)))
+
+
+@pytest.fixture
+def upload(client, auth_headers, case_id):
+    async def _upload(filename="blackbox_0822.mp4", content=b"\x00" * 2048, mime="video/mp4"):
+        files = {"file": (filename, content, mime)}
+        res = await client.post(f"/cases/{case_id}/videos", files=files, headers=auth_headers)
+        assert res.status_code == 201, res.text
+        return res
+
+    return _upload
+
+
+class EventTap:
+    """허브를 직접 구독해 프레임을 모은다."""
+
+    def __init__(self, case_id):
+        from app.sse.hub import hub
+
+        self._it = hub.subscribe(case_id)
+        self.frames: list[str] = []
+
+    async def start(self):
+        await self._it.__anext__()  # connected
+        return self
+
+    async def take(self, n: int, timeout: float = 5.0) -> list[str]:
+        out = []
+        for _ in range(n):
+            frame = await asyncio.wait_for(self._it.__anext__(), timeout=timeout)
+            while frame.startswith(":"):
+                frame = await asyncio.wait_for(self._it.__anext__(), timeout=timeout)
+            out.append(frame)
+        self.frames.extend(out)
+        return out
+
+    async def close(self):
+        await self._it.aclose()
+
+
+@pytest.fixture
+async def sse():
+    taps = []
+
+    async def _open(case_id):
+        tap = await EventTap(case_id).start()
+        taps.append(tap)
+        return tap
+
+    yield _open
+    for t in taps:
+        await t.close()

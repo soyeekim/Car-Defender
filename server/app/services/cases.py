@@ -5,7 +5,19 @@ from app.clock import now_utc
 from app.content.texts import GUIDE_CARD
 from app.errors import ApiError
 from app.ids import new_id
-from app.models import Analysis, Case, Job, Message, Rebuttal, Report, SendLog, User, Verdict, Video
+from app.models import (
+    Analysis,
+    Case,
+    Job,
+    Message,
+    Rebuttal,
+    Report,
+    ReportPdf,
+    SendLog,
+    User,
+    Verdict,
+    Video,
+)
 from app.services.presenters import CaseBundle, case_detail, message_dict
 from app.sse.hub import hub
 
@@ -50,7 +62,17 @@ async def rename_case(db: AsyncSession, case: Case, title: str) -> Case:
 
 
 async def delete_case(db: AsyncSession, case: Case) -> None:
+    from app.storage import get_storage
+
     case_id = case.id
+    storage = get_storage()
+    video = await get_video(db, case_id)
+    if video is not None:
+        await storage.delete(video.storage_key)
+    for report in (await db.execute(select(Report).where(Report.case_id == case_id))).scalars().all():
+        pdf = (await db.execute(select(ReportPdf).where(ReportPdf.report_id == report.id))).scalar_one_or_none()
+        if pdf is not None:
+            await storage.delete(pdf.storage_key)
     await db.delete(case)
     await db.commit()
     hub.drop(case_id)  # 남은 버퍼와 구독자 정리

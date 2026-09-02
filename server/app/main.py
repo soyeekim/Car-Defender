@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import db
-from app.api import auth, cases, events, health, legal, messages, users
+from app.api import auth, cases, events, health, legal, messages, users, videos
 from app.config import get_settings
 from app.errors import register_error_handlers
 from app.jobs.runner import runner
@@ -47,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(cases.router, prefix="/api/v1")
     app.include_router(messages.router, prefix="/api/v1")
     app.include_router(events.router, prefix="/api/v1")
+    app.include_router(videos.router, prefix="/api/v1")
     return app
 
 
