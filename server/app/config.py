@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173"
     front_base_url: str = "http://localhost:5173"
     agent_impl: str = "app.agent.mock:MockAgent"
+    job_timeout_seconds: int = 300  # Job 하나가 이보다 오래 걸리면 실패 처리
+    shutdown_wait_seconds: int = 30  # 종료 시 실행 중 Job 을 기다리는 상한
     storage_backend: str = "local"  # local | s3
     storage_local_dir: str = "./data"
     s3_bucket: str | None = None

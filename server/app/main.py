@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI):
         await db.create_all()
     await runner.cleanup_stale()
     yield
-    await runner.wait_all()
+    await runner.wait_all(timeout=settings.shutdown_wait_seconds)
     await db.dispose()
 
 

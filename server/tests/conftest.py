@@ -65,6 +65,7 @@ async def _drain_jobs():
     from app.jobs.runner import runner
 
     await runner.wait_all()
+    await runner.reset()
 
 
 SIGNUP_BODY = {

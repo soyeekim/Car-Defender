@@ -3,6 +3,7 @@ import asyncio
 import pytest
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.db import session_scope
 from app.errors import ApiError
 from app.jobs.runner import JobRunner
@@ -113,3 +114,42 @@ async def test_cleanup_stale(app, case_id):
     await runner.wait_all()
     async with session_scope() as db:
         assert (await db.get(Job, job_id)).status == "failed"
+
+
+async def test_runner_times_out_slow_handler(app, case_id, monkeypatch):
+    monkeypatch.setattr(get_settings(), "job_timeout_seconds", 0.05)
+    runner = JobRunner()
+
+    async def handler(db, cid, job_id):
+        await asyncio.sleep(30)
+
+    it = hub.subscribe(case_id)
+    await it.__anext__()  # connected
+    async with session_scope() as db:
+        job = await runner.start(db, case_id, "analysis", handler)
+    await it.__anext__()  # start
+    await runner.wait_all()
+    frame = await asyncio.wait_for(it.__anext__(), timeout=2)
+    assert '"activeJob": null' in frame
+    async with session_scope() as db:
+        j = await db.get(Job, job.id)
+        assert j.status == "failed" and j.error["type"] == "TimeoutError" and j.ended_at is not None
+    await it.aclose()
+
+
+async def test_wait_all_with_timeout_cancels_stuck_jobs(app, case_id):
+    runner = JobRunner()
+    started = asyncio.Event()
+
+    async def handler(db, cid, job_id):
+        started.set()
+        await asyncio.sleep(3600)
+
+    async with session_scope() as db:
+        await runner.start(db, case_id, "analysis", handler)
+    await asyncio.wait_for(started.wait(), timeout=2)
+    tasks = list(runner._tasks)
+    await asyncio.wait_for(runner.wait_all(timeout=0.05), timeout=2)
+    assert tasks and all(t.done() for t in tasks)
+    await runner.reset()
+    assert runner._tasks == set()
