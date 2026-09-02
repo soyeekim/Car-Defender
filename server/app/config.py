@@ -1,6 +1,9 @@
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_INSECURE_JWT_SECRETS = {"change-me", "change-me-to-a-long-random-string"}
 
 
 class Settings(BaseSettings):
@@ -36,6 +39,12 @@ class Settings(BaseSettings):
     @property
     def is_prod(self) -> bool:
         return self.app_env == "prod"
+
+    @model_validator(mode="after")
+    def _check_jwt_secret(self) -> "Settings":
+        if self.is_prod and (self.jwt_secret in _INSECURE_JWT_SECRETS or len(self.jwt_secret) < 32):
+            raise ValueError("JWT_SECRET must be a long random value in prod (32자 이상, 기본값 금지)")
+        return self
 
 
 @lru_cache
