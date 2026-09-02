@@ -8,7 +8,8 @@ from app.clock import now_utc, to_kst_iso
 from app.config import get_settings
 from app.errors import ERROR_CATALOG, ApiError
 from app.ids import new_id
-from app.models import RefreshToken, User
+from app.mail import MailMessage, get_mailer
+from app.models import PasswordResetToken, RefreshToken, User
 from app.schemas.auth import AgreementOut, MeResponse, SignupRequest, UserOut
 from app.security import (
     create_access_token,
@@ -180,3 +181,53 @@ def me_response(user: User) -> MeResponse:
             "videoConsent": ag(user.agreed_video_at),
         },
     )
+
+
+RESET_TOKEN_MINUTES = 30
+
+
+async def request_password_reset(db: AsyncSession, email: str) -> None:
+    if not is_email(email):
+        raise ApiError("AUTH_EMAIL_FORMAT", fields={"email": ERROR_CATALOG["AUTH_EMAIL_FORMAT"].message})
+    user = await find_user_by_email(db, email)
+    if user is None:
+        return
+    raw = generate_opaque_token()
+    db.add(
+        PasswordResetToken(
+            id=new_id(),
+            user_id=user.id,
+            token_hash=hash_token(raw),
+            expires_at=now_utc() + timedelta(minutes=RESET_TOKEN_MINUTES),
+            created_at=now_utc(),
+        )
+    )
+    await db.commit()
+    link = f"{get_settings().front_base_url.rstrip('/')}/reset?token={raw}"
+    body = (
+        "카-디펜더 비밀번호 재설정 링크예요. 30분 안에 아래 주소를 열어 새 비밀번호를 정해 주세요.\n\n"
+        f"{link}\n\n"
+        "본인이 요청하지 않았다면 이 메일은 무시해도 돼요."
+    )
+    await get_mailer().send(MailMessage(to=user.email, subject="[카-디펜더] 비밀번호 재설정", body_text=body))
+
+
+async def confirm_password_reset(db: AsyncSession, token: str, password: str, confirm: str) -> None:
+    stmt = select(PasswordResetToken).where(PasswordResetToken.token_hash == hash_token(token or ""))
+    prt = (await db.execute(stmt)).scalar_one_or_none()
+    now = now_utc()
+    if prt is None or prt.used_at is not None:
+        raise ApiError("RESET_TOKEN_INVALID")
+    expires = prt.expires_at if prt.expires_at.tzinfo else prt.expires_at.replace(tzinfo=now.tzinfo)
+    if expires < now:
+        raise ApiError("RESET_TOKEN_INVALID")
+    if not password_policy_ok(password):
+        raise ApiError("AUTH_PASSWORD_POLICY", fields={"password": ERROR_CATALOG["AUTH_PASSWORD_POLICY"].message})
+    if password != confirm:
+        raise ApiError("AUTH_PASSWORD_MISMATCH", fields={"passwordConfirm": ERROR_CATALOG["AUTH_PASSWORD_MISMATCH"].message})
+    user = await db.get(User, prt.user_id)
+    if user is None:
+        raise ApiError("RESET_TOKEN_INVALID")
+    user.password_hash = hash_password(password)
+    prt.used_at = now
+    await db.commit()

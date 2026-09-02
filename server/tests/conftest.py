@@ -13,10 +13,13 @@ def test_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MAIL_BACKEND", "mock")
     monkeypatch.setenv("CORS_ORIGINS", "http://test")
     from app.config import get_settings
+    from app.mail import reset_mailer
 
     get_settings.cache_clear()
+    reset_mailer()
     yield
     get_settings.cache_clear()
+    reset_mailer()
 
 
 @pytest.fixture

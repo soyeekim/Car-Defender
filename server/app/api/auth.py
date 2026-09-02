@@ -10,6 +10,9 @@ from app.schemas.auth import (
     EmailAvailableResponse,
     LoginRequest,
     MeResponse,
+    MessageResponse,
+    PasswordResetConfirmRequest,
+    PasswordResetRequest,
     RefreshResponse,
     SignupRequest,
 )
@@ -67,3 +70,16 @@ async def logout(
 @router.get("/me", response_model=MeResponse)
 async def me(user: User = Depends(current_user)):
     return auth_service.me_response(user)
+
+
+@router.post("/password-reset", status_code=status.HTTP_202_ACCEPTED, response_model=MessageResponse)
+async def password_reset(body: PasswordResetRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    limiter.check(f"reset:{body.email.lower()}", limit=3, per_seconds=60)
+    await auth_service.request_password_reset(db, body.email)
+    return MessageResponse(message="비밀번호 재설정 링크를 보냈어요. 메일함을 확인해 주세요.")
+
+
+@router.post("/password-reset/confirm", response_model=MessageResponse)
+async def password_reset_confirm(body: PasswordResetConfirmRequest, db: AsyncSession = Depends(get_db)):
+    await auth_service.confirm_password_reset(db, body.token, body.password, body.password_confirm)
+    return MessageResponse(message="비밀번호를 바꿨어요. 새 비밀번호로 로그인해 주세요.")
