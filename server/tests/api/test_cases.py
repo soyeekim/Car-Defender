@@ -1,3 +1,7 @@
+import asyncio
+
+import pytest
+
 from app.sse.hub import hub
 
 
@@ -65,6 +69,21 @@ async def test_delete_case(client, auth_headers):
     res = await client.delete(f"/cases/{case_id}", headers=auth_headers)
     assert res.status_code == 204
     assert (await client.get(f"/cases/{case_id}", headers=auth_headers)).status_code == 404
+
+
+async def test_delete_case_drops_hub_buffer_and_subscribers(client, auth_headers):
+    case_id = (await client.post("/cases", headers=auth_headers)).json()["id"]
+    it = hub.subscribe(case_id)
+    await it.__anext__()  # connected
+    hub.publish(case_id, "case.updated", {"id": case_id})
+    await it.__anext__()
+    assert hub.buffer_count(case_id) == 1
+
+    assert (await client.delete(f"/cases/{case_id}", headers=auth_headers)).status_code == 204
+    assert hub.buffer_count(case_id) == 0
+    assert hub.subscriber_count(case_id) == 0
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(it.__anext__(), timeout=1)
 
 
 async def test_rename_publishes_case_updated(client, auth_headers):

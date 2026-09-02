@@ -1,7 +1,9 @@
 import asyncio
 import json
 
-from app.sse.hub import Hub, format_frame
+import pytest
+
+from app.sse.hub import QUEUE_MAXSIZE, Hub, format_frame
 
 
 def parse(frame: str) -> tuple[str, str, dict]:
@@ -99,7 +101,7 @@ async def test_prune_removes_empty_buffer_key():
     assert hub.buffer_count("c1") == 1
     assert "c1" in hub._buffers
 
-    it = hub.subscribe("c1", last_event_id="0")
+    it = hub.subscribe("c1", last_event_id="0" * 26)  # 어떤 id 보다도 작은 유효한 ULID
     await it.__anext__()  # connected
     # generator resumes past connected here: prunes c1 (all stale), replays
     # nothing, then idles into the keepalive loop
@@ -108,3 +110,37 @@ async def test_prune_removes_empty_buffer_key():
     assert hub.buffer_count("c1") == 0
     assert "c1" not in hub._buffers
     await it.aclose()
+
+
+async def test_malformed_last_event_id_is_ignored():
+    hub = Hub()
+    it = hub.subscribe("c1", last_event_id="zzz")
+    _, ev, _ = parse(await it.__anext__())
+    assert ev == "connected"
+    hub.publish("c1", "x", {"n": 1})
+    _, ev, d = parse(await asyncio.wait_for(it.__anext__(), timeout=1))
+    assert ev == "x" and d["n"] == 1
+    await it.aclose()
+
+
+async def test_slow_subscriber_is_dropped_when_queue_overflows():
+    hub = Hub()
+    it = hub.subscribe("c1")
+    await it.__anext__()  # connected, 이후로는 읽지 않는 느린 구독자
+    for n in range(QUEUE_MAXSIZE + 44):
+        hub.publish("c1", "x", {"n": n})
+    assert hub.subscriber_count("c1") == 0
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(it.__anext__(), timeout=1)
+
+
+async def test_drop_clears_buffer_and_closes_subscribers():
+    hub = Hub()
+    hub.publish("c1", "x", {"n": 1})
+    it = hub.subscribe("c1")
+    await it.__anext__()  # connected
+    hub.drop("c1")
+    assert hub.buffer_count("c1") == 0
+    assert hub.subscriber_count("c1") == 0
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(it.__anext__(), timeout=1)

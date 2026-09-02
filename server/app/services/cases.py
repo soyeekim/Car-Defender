@@ -50,8 +50,10 @@ async def rename_case(db: AsyncSession, case: Case, title: str) -> Case:
 
 
 async def delete_case(db: AsyncSession, case: Case) -> None:
+    case_id = case.id
     await db.delete(case)
     await db.commit()
+    hub.drop(case_id)  # 남은 버퍼와 구독자 정리
 
 
 async def get_video(db: AsyncSession, case_id: str) -> Video | None:
