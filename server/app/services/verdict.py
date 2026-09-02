@@ -55,7 +55,10 @@ async def perform_verdict(db: AsyncSession, case_id: str) -> Verdict:
         basis=result.basis.model_dump(), is_active=True, created_at=now_utc(),
     )
     db.add(verdict)
-    case_service.set_status(case, "judged")
+    if case.status in ("sent", "closed"):
+        case_service.touch(case)  # 이미 보낸/종결된 사건은 재판정해도 상태를 되돌리지 않는다
+    else:
+        case_service.set_status(case, "judged")
     await db.commit()
     await case_service.add_message(db, case_id, "assistant", "verdict", verdict_payload(verdict))
     await case_service.publish_case_updated(db, case_id)

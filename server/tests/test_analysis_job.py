@@ -3,7 +3,7 @@ from sqlalchemy import select
 from app.clock import now_utc
 from app.db import session_scope
 from app.jobs.runner import runner
-from app.models import Analysis, Case, Video
+from app.models import Analysis, Case, Message, Video
 from app.services.cases import add_message
 from app.services.verdict import perform_verdict
 
@@ -130,3 +130,22 @@ async def test_analysis_failure_is_retried_by_the_next_message(client, auth_head
     await settle()
     detail = (await client.get(f"/cases/{case_id}", headers=auth_headers)).json()
     assert detail["status"] == "needs_review" and calls["n"] == 2
+
+
+async def test_perform_verdict_does_not_downgrade_sent_case(client, auth_headers, case_id):
+    async with session_scope() as db:
+        db.add(Analysis(case_id=case_id, summary_text="s", facts={}, questions=[], created_at=now_utc(), updated_at=now_utc()))
+        case = await db.get(Case, case_id)
+        case.status = "sent"
+        await db.commit()
+
+        verdict = await perform_verdict(db, case_id)
+        assert verdict.version == 1 and verdict.is_active
+
+        case = await db.get(Case, case_id)
+        assert case.status == "sent"  # 발송 완료를 판정 완료로 되돌리지 않는다
+        cards = (await db.execute(select(Message).where(Message.case_id == case_id, Message.type == "verdict"))).scalars().all()
+        assert len(cards) == 1 and cards[0].payload["version"] == 1
+
+    detail = (await client.get(f"/cases/{case_id}", headers=auth_headers)).json()
+    assert detail["status"] == "sent" and detail["verdict"]["version"] == 1
