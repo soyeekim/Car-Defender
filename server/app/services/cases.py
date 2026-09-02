@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clock import now_utc
-from app.content.texts import GUIDE_CARD
+from app.content.texts import GUIDE_CARD, UPLOAD_CTA
 from app.errors import ApiError
 from app.ids import new_id
 from app.models import (
@@ -154,6 +154,13 @@ async def add_message(db: AsyncSession, case_id: str, role: str, type_: str, pay
     if publish:
         hub.publish(case_id, "message.created", message_dict(msg))
     return msg
+
+
+async def assistant_text(db: AsyncSession, case_id: str, text: str) -> Message:
+    """assistant text 카드 한 장. 영상이 아직 없으면 업로드 CTA를 붙인다."""
+    has_video = await get_video(db, case_id) is not None
+    payload = {"text": text, "cta": None if has_video else dict(UPLOAD_CTA)}
+    return await add_message(db, case_id, "assistant", "text", payload)
 
 
 async def update_message(db: AsyncSession, message: Message, payload: dict) -> Message:

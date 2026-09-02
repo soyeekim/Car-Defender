@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.base import ChatInput
 from app.agent.loader import get_agent
 from app.config import get_settings
-from app.content.texts import REBUTTAL_LOCKED_CARD, UPLOAD_CTA
+from app.content.texts import REBUTTAL_LOCKED_CARD
 from app.db import session_scope
 from app.errors import ERROR_CATALOG, ApiError
 from app.jobs.analysis import start_analysis
@@ -64,8 +64,7 @@ async def send_user_message(db: AsyncSession, case: Case, text: str) -> Message:
 
 
 async def _assistant_text(db: AsyncSession, case_id: str, text: str) -> None:
-    has_video = await case_service.get_video(db, case_id) is not None
-    await case_service.add_message(db, case_id, "assistant", "text", {"text": text, "cta": None if has_video else dict(UPLOAD_CTA)})
+    await case_service.assistant_text(db, case_id, text)
 
 
 async def process_user_message(case_id: str, message_id: str) -> None:

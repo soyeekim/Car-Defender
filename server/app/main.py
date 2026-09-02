@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -10,7 +11,9 @@ from app.config import get_settings
 from app.errors import register_error_handlers
 from app.jobs.runner import runner
 from app.middleware import CatchAllErrorMiddleware
-from app.services import chat
+from app.services import actions, chat
+
+log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -23,6 +26,8 @@ async def lifespan(app: FastAPI):
     if settings.app_env == "test":
         await db.create_all()
     await runner.cleanup_stale()
+    # 등록된 next_action 처리기를 남긴다: 문서 생성·반박 액션이 붙었는지 기동 로그로 확인한다.
+    log.info("등록된 액션: %s", ", ".join(actions.registered()) or "(없음)")
     yield
     await chat.wait_all(timeout=settings.shutdown_wait_seconds)
     await runner.wait_all(timeout=settings.shutdown_wait_seconds)

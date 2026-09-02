@@ -130,7 +130,7 @@ async def upload_video(db: AsyncSession, case: Case, upload: UploadFile) -> tupl
         job = await start_analysis(db, case)
         return video, job, False
 
-    await case_service.add_message(db, case.id, "assistant", "text", {"text": NEED_DESCRIPTION_TEXT, "cta": None})
+    await case_service.assistant_text(db, case.id, NEED_DESCRIPTION_TEXT)
     await case_service.publish_case_updated(db, case.id)
     return video, None, True
 

@@ -45,9 +45,9 @@ async def run_analysis(db: AsyncSession, case_id: str, job_id: str) -> None:
         video.meta = {"speedKph": result.video_meta.speed_kph, "impactAtSec": result.video_meta.impact_at_sec}
     await db.commit()
 
-    await case_service.add_message(db, case_id, "assistant", "text", {"text": result.summary_text, "cta": None})
+    await case_service.assistant_text(db, case_id, result.summary_text)
     if result.questions:
-        await case_service.add_message(db, case_id, "assistant", "text", {"text": result.questions[0], "cta": None})
+        await case_service.assistant_text(db, case_id, result.questions[0])
 
     stmt = select(Message).where(Message.case_id == case_id, Message.type == "video_attachment").order_by(Message.id.desc())
     card = (await db.execute(stmt)).scalars().first()
@@ -59,6 +59,4 @@ async def run_analysis(db: AsyncSession, case_id: str, job_id: str) -> None:
         await db.commit()
         await case_service.publish_case_updated(db, case_id)
     else:
-        case_service.set_status(case, "needs_review")
-        await db.commit()
         await perform_verdict(db, case_id)
