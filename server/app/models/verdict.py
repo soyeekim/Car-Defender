@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -16,7 +17,7 @@ class Verdict(Base):
     ratio_other: Mapped[int] = mapped_column(Integer, nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     change_reason: Mapped[str | None] = mapped_column(Text)
-    opponent_claim: Mapped[dict | None] = mapped_column(JSON)
-    basis: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    opponent_claim: Mapped[dict | None] = mapped_column(MutableDict.as_mutable(JSON))
+    basis: Mapped[dict] = mapped_column(MutableDict.as_mutable(JSON), nullable=False, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

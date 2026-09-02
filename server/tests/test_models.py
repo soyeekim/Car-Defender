@@ -3,7 +3,7 @@ from sqlalchemy import select
 from app.clock import now_utc
 from app.db import session_scope
 from app.ids import new_id
-from app.models import Case, Job, Message, SendLog, User, Verdict
+from app.models import Analysis, Case, Job, Message, SendLog, User, Verdict
 
 
 async def _user(db):
@@ -35,3 +35,24 @@ async def test_case_cascade_deletes_children_but_keeps_send_log(app):
         assert (await db.execute(select(Verdict))).scalars().all() == []
         assert (await db.execute(select(Job))).scalars().all() == []
         assert len((await db.execute(select(SendLog))).scalars().all()) == 1
+
+
+async def test_json_columns_track_in_place_mutation(app):
+    async with session_scope() as db:
+        u = await _user(db)
+        c = Case(id=new_id(), user_id=u.id, title="새 사건", status="intake", created_at=now_utc(), updated_at=now_utc())
+        db.add(c)
+        db.add(Analysis(case_id=c.id, summary_text="s", facts={"a": 1}, questions=[], created_at=now_utc(), updated_at=now_utc()))
+        await db.commit()
+        case_id = c.id
+
+    async with session_scope() as db:
+        a = await db.get(Analysis, case_id)
+        a.facts["k"] = "v"  # 통째로 대입하지 않고 제자리 수정
+        a.questions.append("q1")
+        await db.commit()
+
+    async with session_scope() as db:
+        a = await db.get(Analysis, case_id)
+        assert a.facts == {"a": 1, "k": "v"}
+        assert a.questions == ["q1"]
