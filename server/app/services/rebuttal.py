@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clock import now_utc
+from app.clock import now_utc, to_kst_iso
 from app.content.texts import (
     ATTACHMENT_NOTICE_CARD,
     ATTACHMENT_NOTICE_FULL,
@@ -9,14 +9,21 @@ from app.content.texts import (
     CLAIM_NUMBER_HINT,
     CLAIM_NUMBER_HINT_SHORT,
     RECIPIENT_PLACEHOLDER,
+    SENT_NEXT_STEPS,
+    SENT_NOTICE,
 )
 from app.errors import ApiError
-from app.models import Case, Job, Message, Rebuttal, User, Video
+from app.ids import new_id
+from app.mail import MailAttachment, MailMessage, MailSendError, get_mailer
+from app.mail.templates import rebuttal_body
+from app.models import Case, Job, Message, Rebuttal, SendLog, User, Video
 from app.schemas.rebuttal import RebuttalPatch
 from app.security import is_email
 from app.services import cases as case_service
 from app.services.actions import register_action
-from app.services.report import pdf_for
+from app.services.report import ensure_pdf, pdf_for, report_by_version
+from app.sse.hub import hub
+from app.storage import get_storage
 
 MAX_ATTACH_BYTES = 25 * 1024 * 1024
 
@@ -165,3 +172,88 @@ async def _action_create_rebuttal(db: AsyncSession, case: Case) -> None:
 
 
 register_action("create_rebuttal", _action_create_rebuttal)
+
+
+def _send_result(log: SendLog, attachment_count: int) -> dict:
+    return {"sendLogId": log.id, "sentAt": to_kst_iso(log.sent_at), "fromEmail": log.from_email, "recipient": log.recipient, "attachmentCount": attachment_count}
+
+
+async def send(db: AsyncSession, case: Case, rebuttal: Rebuttal, user: User, idempotency_key: str | None) -> dict:
+    if not idempotency_key:
+        raise ApiError("IDEMPOTENCY_KEY_REQUIRED")
+    prior = (await db.execute(select(SendLog).where(SendLog.idempotency_key == idempotency_key))).scalar_one_or_none()
+    if prior is not None:
+        if prior.result == "sent":
+            return _send_result(prior, len(prior.attachment_names))
+        raise ApiError("MAIL_SEND_FAILED")
+    if rebuttal.status == "sent":
+        raise ApiError("REBUTTAL_ALREADY_SENT")
+    if not is_email(rebuttal.recipient):
+        raise ApiError("RECIPIENT_INVALID", fields={"recipient": "이메일 주소가 아니에요. name@company.co.kr 처럼 고치면 보내기가 열려요."})
+    if not (rebuttal.claim_number or "").strip():
+        raise ApiError("CLAIM_NUMBER_REQUIRED", fields={"claimNumber": "접수번호를 넣어야 보험사가 사건을 찾을 수 있어요. 보험사 접수 문자나 메일에 있어요."})
+
+    # 첨부 준비 (PDF는 없으면 지금 만든다)
+    for a in rebuttal.attachments:
+        if a["kind"] == "report_pdf" and a["included"]:
+            report = await report_by_version(db, case.id, "latest")
+            await ensure_pdf(db, case, report)
+            a["refId"] = report.id
+    rebuttal.attachments = [dict(a) for a in rebuttal.attachments]
+    attachments = await resolve_attachments(db, rebuttal)
+    video_dropped = any(a["kind"] == "video" and a.get("note") for a in attachments)
+    files: list[MailAttachment] = []
+    storage = get_storage()
+    for a in attachments:
+        if not a["included"]:
+            continue
+        if a["kind"] == "report_pdf":
+            pdf = await pdf_for(db, a["refId"])
+            files.append(MailAttachment(filename=pdf.filename, content=await storage.read_bytes(pdf.storage_key), mime_type="application/pdf"))
+        elif a["kind"] == "video":
+            video = await db.get(Video, a["refId"])
+            if video is not None:
+                files.append(MailAttachment(filename=video.filename, content=await storage.read_bytes(video.storage_key), mime_type=video.mime_type))
+
+    msg = MailMessage(
+        to=rebuttal.recipient, subject=rebuttal.subject,
+        body_text=rebuttal_body(rebuttal.body, user.email, video_dropped),
+        reply_to=user.email, sender_email=user.email, display_name=f"카-디펜더 ({user.email})", attachments=files,
+    )
+    now = now_utc()
+    log = SendLog(
+        id=new_id(), case_id=case.id, rebuttal_id=rebuttal.id, idempotency_key=idempotency_key, sent_at=now,
+        from_email=user.email, recipient=rebuttal.recipient, subject=rebuttal.subject,
+        attachment_names=[f.filename for f in files], result="failed", provider_message_id=None, error=None,
+    )
+    try:
+        log.provider_message_id = await get_mailer().send(msg)
+        log.result = "sent"
+    except MailSendError as e:
+        log.error = str(e)
+        db.add(log)
+        await db.commit()
+        raise ApiError("MAIL_SEND_FAILED") from e
+
+    rebuttal.status = "sent"
+    rebuttal.updated_at = now
+    db.add(log)
+    case_service.set_status(case, "sent")
+    await db.commit()
+
+    await case_service.add_message(db, case.id, "assistant", "sent", {
+        "sendLogId": log.id, "sentAt": to_kst_iso(now), "recipient": rebuttal.recipient,
+        "attachmentCount": len(files), "notice": SENT_NOTICE, "nextSteps": list(SENT_NEXT_STEPS),
+    })
+    hub.publish(case.id, "rebuttal.sent", {"sendLogId": log.id, "sentAt": to_kst_iso(now), "recipient": rebuttal.recipient})
+    await case_service.publish_case_updated(db, case.id)
+    return _send_result(log, len(files))
+
+
+async def send_logs(db: AsyncSession, case_id: str) -> dict:
+    stmt = select(SendLog).where(SendLog.case_id == case_id).order_by(SendLog.sent_at.desc(), SendLog.id.desc())
+    items = [{
+        "sendLogId": s.id, "sentAt": to_kst_iso(s.sent_at), "fromEmail": s.from_email, "recipient": s.recipient,
+        "subject": s.subject, "attachmentCount": len(s.attachment_names), "attachmentNames": s.attachment_names, "result": s.result,
+    } for s in (await db.execute(stmt)).scalars().all()]
+    return {"items": items}

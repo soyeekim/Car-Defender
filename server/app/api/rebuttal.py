@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Header, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -34,3 +34,17 @@ async def get(case: Case = Depends(owned_case), user: User = Depends(current_use
 async def patch(body: RebuttalPatch, case: Case = Depends(owned_case), user: User = Depends(current_user), db: AsyncSession = Depends(get_db)) -> dict:
     rebuttal = await rebuttal_service.apply_patch(db, await _rebuttal_or_404(db, case.id), body)
     return await rebuttal_service.view(db, case, rebuttal, user)
+
+
+@router.post("/send")
+async def send(
+    case: Case = Depends(owned_case), user: User = Depends(current_user), db: AsyncSession = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
+    rebuttal = await _rebuttal_or_404(db, case.id)
+    return await rebuttal_service.send(db, case, rebuttal, user, idempotency_key)
+
+
+@router.get("/sends")
+async def sends(case: Case = Depends(owned_case), db: AsyncSession = Depends(get_db)) -> dict:
+    return await rebuttal_service.send_logs(db, case.id)
