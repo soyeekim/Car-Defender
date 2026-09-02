@@ -5,7 +5,7 @@ from fastapi import Response
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clock import now_utc, to_kst_iso
+from app.clock import ensure_aware, now_utc, to_kst_iso
 from app.config import get_settings
 from app.errors import ERROR_CATALOG, ApiError
 from app.ids import new_id
@@ -160,7 +160,7 @@ async def refresh_access(db: AsyncSession, raw: str | None) -> User:
     if rt is None:
         raise ApiError("UNAUTHORIZED")
     now = now_utc()
-    expires = rt.expires_at if rt.expires_at.tzinfo else rt.expires_at.replace(tzinfo=now.tzinfo)
+    expires = ensure_aware(rt.expires_at)
     if rt.revoked_at is not None or expires < now:
         raise ApiError("TOKEN_EXPIRED")
     user = await db.get(User, rt.user_id)
@@ -231,7 +231,7 @@ async def confirm_password_reset(db: AsyncSession, token: str, password: str, co
     now = now_utc()
     if prt is None or prt.used_at is not None:
         raise ApiError("RESET_TOKEN_INVALID")
-    expires = prt.expires_at if prt.expires_at.tzinfo else prt.expires_at.replace(tzinfo=now.tzinfo)
+    expires = ensure_aware(prt.expires_at)
     if expires < now:
         raise ApiError("RESET_TOKEN_INVALID")
     if not password_policy_ok(password):

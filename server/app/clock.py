@@ -7,12 +7,15 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _aware(dt: datetime) -> datetime:
+def ensure_aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+_aware = ensure_aware  # 하위 호환 별칭
+
+
 def to_kst(dt: datetime) -> datetime:
-    return _aware(dt).astimezone(KST)
+    return ensure_aware(dt).astimezone(KST)
 
 
 def to_kst_iso(dt: datetime | None) -> str | None:

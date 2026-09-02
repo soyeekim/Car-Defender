@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from app.clock import kst_date_label, kst_datetime_label, now_utc, to_kst_iso
+from app.clock import ensure_aware, kst_date_label, kst_datetime_label, now_utc, to_kst_iso
 from app.ids import new_id
 
 
@@ -31,3 +31,15 @@ def test_labels():
 
 def test_now_utc_is_aware():
     assert now_utc().tzinfo is not None
+
+
+def test_ensure_aware_adds_utc_to_naive_datetime():
+    naive = datetime(2026, 8, 22, 9, 11, 4)
+    aware = ensure_aware(naive)
+    assert aware.tzinfo is not None
+    assert aware == datetime(2026, 8, 22, 9, 11, 4, tzinfo=timezone.utc)
+
+
+def test_ensure_aware_leaves_aware_datetime_untouched():
+    dt = datetime(2026, 8, 22, 9, 11, 4, tzinfo=timezone.utc)
+    assert ensure_aware(dt) is dt
