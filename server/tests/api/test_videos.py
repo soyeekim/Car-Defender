@@ -9,6 +9,8 @@ def test_parse_range():
     assert parse_range("bytes=0-500", 100) == (0, 99)
     assert parse_range("bytes=200-300", 100) is None
     assert parse_range("garbage", 100) is None
+    assert parse_range("bytes=500-100", 1000) is None  # 역전된 범위
+    assert parse_range("bytes=-0", 100) is None  # 길이 0 접미 범위
 
 
 def test_duration_label():
@@ -172,3 +174,88 @@ async def test_delete_case_removes_storage_after_commit(client, auth_headers, ca
 
     assert (await client.delete(f"/cases/{case_id}", headers=auth_headers)).status_code == 204
     assert captured.get("case_exists") is False
+
+
+async def test_reversed_and_empty_range_fall_back_to_full_body(client, auth_headers, case_id, upload):
+    content = bytes(range(256)) * 4
+    video_id = (await upload(content=content)).json()["video"]["id"]
+    meta = (await client.get(f"/videos/{video_id}", headers=auth_headers)).json()
+    stream_url = meta["streamUrl"].removeprefix("/api/v1")
+
+    for header in ("bytes=500-100", "bytes=-0"):
+        res = await client.get(stream_url, headers={"Range": header})
+        assert res.status_code == 200, header
+        assert "content-range" not in res.headers
+        assert res.content == content
+
+
+async def test_upload_normalizes_client_mime_and_stream_never_echoes_it(client, auth_headers, case_id):
+    files = {"file": ("evil.html", b"<script>alert(1)</script>", "text/html")}
+    res = await client.post(f"/cases/{case_id}/videos", files=files, headers=auth_headers)
+    assert res.status_code == 201, res.text
+    video_id = res.json()["video"]["id"]
+    assert res.json()["video"]["mimeType"] == "video/mp4"
+
+    meta = (await client.get(f"/videos/{video_id}", headers=auth_headers)).json()
+    stream = await client.get(meta["streamUrl"].removeprefix("/api/v1"))
+    assert stream.status_code == 200
+    assert stream.headers["content-type"].startswith("video/mp4")
+    assert stream.headers["x-content-type-options"] == "nosniff"
+
+    ranged = await client.get(meta["streamUrl"].removeprefix("/api/v1"), headers={"Range": "bytes=0-3"})
+    assert ranged.status_code == 206
+    assert ranged.headers["content-type"].startswith("video/mp4")
+    assert ranged.headers["x-content-type-options"] == "nosniff"
+
+
+async def test_stream_falls_back_when_stored_mime_is_unknown(client, auth_headers, case_id, upload):
+    from app.db import session_scope
+    from app.models import Video
+
+    video_id = (await upload()).json()["video"]["id"]
+    async with session_scope() as db:
+        video = await db.get(Video, video_id)
+        video.mime_type = "text/html"
+        await db.commit()
+
+    meta = (await client.get(f"/videos/{video_id}", headers=auth_headers)).json()
+    stream = await client.get(meta["streamUrl"].removeprefix("/api/v1"))
+    assert stream.headers["content-type"].startswith("video/mp4")
+
+
+async def test_upload_truncates_long_filename(client, auth_headers, case_id):
+    files = {"file": ("x" * 300 + ".mp4", bytes(1024), "video/mp4")}
+    res = await client.post(f"/cases/{case_id}/videos", files=files, headers=auth_headers)
+    assert res.status_code == 201, res.text
+    assert len(res.json()["video"]["filename"]) <= 255
+
+    from app.db import session_scope
+    from app.models import Video
+
+    async with session_scope() as db:
+        video = await db.get(Video, res.json()["video"]["id"])
+        assert len(video.filename) <= 255 and len(video.mime_type) <= 64
+
+
+async def test_stream_does_not_hold_db_session_while_sending(client, auth_headers, case_id, upload, monkeypatch):
+    from app.db import engine
+    from app.storage import get_storage
+
+    video_id = (await upload(content=bytes(range(256)) * 8)).json()["video"]["id"]
+    meta = (await client.get(f"/videos/{video_id}", headers=auth_headers)).json()
+
+    storage = get_storage()
+    original = storage.read_range
+    seen: dict = {}
+
+    def _spy(key, start, end):
+        async def _gen():
+            async for chunk in original(key, start, end):
+                seen.setdefault("checkedout", engine().pool.checkedout())
+                yield chunk
+        return _gen()
+
+    monkeypatch.setattr(storage, "read_range", _spy)
+    res = await client.get(meta["streamUrl"].removeprefix("/api/v1"))
+    assert res.status_code == 200
+    assert seen["checkedout"] == 0

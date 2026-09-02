@@ -85,8 +85,17 @@ async def has_user_text(db: AsyncSession, case_id: str) -> bool:
     return (await db.execute(stmt)).first() is not None
 
 
+FILENAME_MAX = 255
+MIME_MAX = 64
+
+
+def normalize_mime(raw: str | None) -> str:
+    """클라이언트가 준 Content-Type은 믿지 않는다. 아는 영상 타입이 아니면 mp4로 고정."""
+    return raw if raw in EXT_BY_MIME else "video/mp4"
+
+
 async def upload_video(db: AsyncSession, case: Case, upload: UploadFile) -> tuple[Video, Job | None, bool]:
-    mime = upload.content_type or "video/mp4"
+    mime = normalize_mime(upload.content_type)
     video_id = new_id()
     key = video_key(case.id, video_id, mime)
 
@@ -108,8 +117,8 @@ async def upload_video(db: AsyncSession, case: Case, upload: UploadFile) -> tupl
         await db.flush()
 
     video = Video(
-        id=video_id, case_id=case.id, filename=upload.filename or "video.mp4", size_bytes=size,
-        duration_sec=duration_sec, mime_type=mime, recorded_at=recorded_at, meta=None,
+        id=video_id, case_id=case.id, filename=(upload.filename or "video.mp4")[:FILENAME_MAX], size_bytes=size,
+        duration_sec=duration_sec, mime_type=mime[:MIME_MAX], recorded_at=recorded_at, meta=None,
         storage_key=key, created_at=now_utc(),
     )
     db.add(video)
@@ -169,9 +178,12 @@ def parse_range(header: str | None, size: int) -> tuple[int, int] | None:
         return None
     if start_s == "":
         length = min(int(end_s), size)
-        return size - length, size - 1
-    start = int(start_s)
-    if start >= size:
-        return None
-    end = min(int(end_s), size - 1) if end_s else size - 1
+        start, end = size - length, size - 1
+    else:
+        start = int(start_s)
+        if start >= size:
+            return None
+        end = min(int(end_s), size - 1) if end_s else size - 1
+    if start > end:
+        return None  # 역전된 범위(bytes=500-100)나 길이 0(bytes=-0)은 없는 것으로 본다
     return start, end
