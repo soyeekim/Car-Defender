@@ -15,14 +15,17 @@ def test_env(tmp_path, monkeypatch):
     from app.agent.loader import reset_agent
     from app.config import get_settings
     from app.mail import reset_mailer
+    from app.storage import reset_storage
 
     get_settings.cache_clear()
     reset_mailer()
     reset_agent()
+    reset_storage()
     yield
     get_settings.cache_clear()
     reset_mailer()
     reset_agent()
+    reset_storage()
 
 
 @pytest.fixture

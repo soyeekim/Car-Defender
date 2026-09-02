@@ -1,5 +1,4 @@
 import logging
-import os
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -9,6 +8,7 @@ from app import db
 from app.agent.loader import load_agent_class
 from app.config import get_settings
 from app.mail import get_mailer
+from app.storage import get_storage
 
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["system"])
@@ -25,22 +25,7 @@ async def _check_db() -> bool:
 
 
 def _check_storage(settings) -> bool:
-    if settings.storage_backend == "s3":
-        return bool(settings.s3_bucket)
-    probe = os.path.join(settings.storage_local_dir, ".health")
-    try:
-        os.makedirs(settings.storage_local_dir, exist_ok=True)
-        with open(probe, "w") as f:
-            f.write("ok")
-        return True
-    except OSError:
-        log.exception("health: storage")
-        return False
-    finally:
-        try:
-            os.remove(probe)
-        except OSError:
-            pass
+    return get_storage().healthy()
 
 
 def _check_agent(settings) -> bool:
