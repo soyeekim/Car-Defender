@@ -47,6 +47,15 @@ def _reset_limiter():
     limiter.reset()
 
 
+@pytest.fixture(autouse=True)
+def _reset_hub():
+    from app.sse.hub import hub
+
+    hub.reset()
+    yield
+    hub.reset()
+
+
 SIGNUP_BODY = {
     "email": "hyun@example.com",
     "password": "carguard12",
@@ -60,3 +69,10 @@ async def auth_headers(client):
     res = await client.post("/auth/signup", json=SIGNUP_BODY)
     assert res.status_code == 201, res.text
     return {"Authorization": f"Bearer {res.json()['accessToken']}"}
+
+
+@pytest.fixture
+async def case_id(client, auth_headers):
+    res = await client.post("/cases", headers=auth_headers)
+    assert res.status_code == 201, res.text
+    return res.json()["id"]
