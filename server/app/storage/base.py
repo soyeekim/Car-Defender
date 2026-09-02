@@ -18,6 +18,12 @@ class StorageBackend(Protocol):
 
 
 def validate_key(key: str) -> str:
-    if not key or key.startswith("/") or ".." in key.split("/"):
+    if (
+        not key
+        or key.startswith("/")
+        or "\\" in key
+        or ":" in key
+        or ".." in key.split("/")
+    ):
         raise ValueError(f"잘못된 스토리지 키: {key!r}")
     return key

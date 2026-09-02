@@ -33,3 +33,37 @@ def test_get_storage_returns_local_by_default(test_env):
     reset_storage()
     assert isinstance(get_storage(), LocalStorage)
     assert get_storage().healthy()
+
+
+@pytest.mark.parametrize("bad_key", ["..\\escape", "C:\\x\\y", "a\\b"])
+def test_validate_key_rejects_windows_path_tricks(bad_key):
+    from app.storage.base import validate_key
+
+    with pytest.raises(ValueError):
+        validate_key(bad_key)
+
+
+@pytest.mark.parametrize("bad_key", ["..\\escape", "C:\\x\\y", "a\\b"])
+async def test_local_storage_put_bytes_rejects_windows_path_tricks(tmp_path, bad_key):
+    st = LocalStorage(tmp_path / "store")
+    with pytest.raises(ValueError):
+        await st.put_bytes(bad_key, b"x")
+
+
+def test_local_storage_healthy_true_for_writable_dir(tmp_path):
+    st = LocalStorage(tmp_path / "store")
+    assert st.healthy() is True
+
+
+def test_local_storage_healthy_false_when_root_is_a_file(tmp_path):
+    file_path = tmp_path / "not_a_dir"
+    file_path.write_text("x")
+    st = LocalStorage(file_path)
+    assert st.healthy() is False
+
+
+async def test_local_storage_read_range_empty_when_start_after_end(tmp_path):
+    st = LocalStorage(tmp_path / "store")
+    await st.put_bytes("a.bin", b"0123456789")
+    chunks = [c async for c in st.read_range("a.bin", 5, 2)]
+    assert chunks == []
