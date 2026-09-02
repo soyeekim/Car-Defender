@@ -14,6 +14,7 @@ from app.api import (
     legal,
     messages,
     precedents,
+    rebuttal,
     report,
     users,
     verdict,
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     app.include_router(verdict.router, prefix="/api/v1")
     app.include_router(precedents.router, prefix="/api/v1")
     app.include_router(report.router, prefix="/api/v1")
+    app.include_router(rebuttal.router, prefix="/api/v1")
     return app
 
 

@@ -81,6 +81,7 @@ async def _drain_jobs():
 
 @pytest.fixture(autouse=True)
 def _reset_actions():
+    import app.services.rebuttal  # noqa: F401  import 시점에 등록되는 실제 액션을 스냅샷에 포함시킨다
     import app.services.report  # noqa: F401  import 시점에 등록되는 실제 액션을 스냅샷에 포함시킨다
     from app.services import actions
 
@@ -188,6 +189,14 @@ async def judged_case(client, auth_headers, case_id, upload, settle):
     detail = (await client.get(f"/cases/{case_id}", headers=auth_headers)).json()
     assert detail["status"] == "judged", detail
     return case_id
+
+
+@pytest.fixture
+async def reported_case(client, auth_headers, judged_case, settle):
+    r = await client.post(f"/cases/{judged_case}/report", headers=auth_headers)
+    assert r.status_code == 202, r.text
+    await settle()
+    return judged_case
 
 
 @pytest.fixture

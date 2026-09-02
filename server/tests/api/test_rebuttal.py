@@ -1,0 +1,82 @@
+async def test_rebuttal_locked_without_verdict_and_report(client, auth_headers, case_id):
+    res = await client.post(f"/cases/{case_id}/rebuttal", headers=auth_headers)
+    assert res.status_code == 409
+    err = res.json()["error"]
+    assert err["code"] == "REBUTTAL_LOCKED" and err["fields"] == {"missing": "verdict,report"}
+    assert err["actions"] == [{"label": "사건경위서 먼저 만들기", "type": "create_report"}]
+
+
+async def test_rebuttal_locked_without_report(client, auth_headers, judged_case):
+    res = await client.post(f"/cases/{judged_case}/rebuttal", headers=auth_headers)
+    assert res.json()["error"]["fields"] == {"missing": "report"}
+    assert (await client.get(f"/cases/{judged_case}/rebuttal", headers=auth_headers)).status_code == 404
+
+
+async def test_rebuttal_draft_flow(client, auth_headers, reported_case, sse, settle):
+    tap = await sse(reported_case)
+    res = await client.post(f"/cases/{reported_case}/rebuttal", headers=auth_headers)
+    assert res.status_code == 202 and res.json()["kind"] == "rebuttal"
+    await settle()
+    frames = await tap.take(3)
+    assert '"type": "rebuttal_draft"' in frames[1]
+    assert '"canSend": false' in frames[1] and '"blockedBy": ["recipient", "claimNumber"]' in frames[1]
+    assert '"subject": "과실비율 재검토 요청 (접수번호는 아직 안 넣었어요)"' in frames[1]
+    assert '"recipientPlaceholder": "아직 안 정했어요"' in frames[1]
+    assert '"rebuttal": {"exists": true, "locked": false, "label": "작성 중"}' in frames[2]
+    detail = (await client.get(f"/cases/{reported_case}", headers=auth_headers)).json()
+    assert detail["stages"]["rebuttal"] == {"state": "in_progress"}
+
+    g2 = (await client.get(f"/cases/{reported_case}/rebuttal", headers=auth_headers)).json()
+    assert g2["status"] == "draft" and g2["editable"] is True and g2["subjectAuto"] is True
+    assert g2["fromEmail"] == "hyun@example.com"
+    kinds = [a["kind"] for a in g2["attachments"]]
+    assert kinds == ["report_pdf", "video"] and all(a["included"] for a in g2["attachments"])
+    assert g2["attachments"][0]["name"] == "사건경위서.pdf" and g2["attachments"][1]["name"] == "blackbox_0822.mp4"
+    assert g2["attachmentNotice"].startswith("영상에는 상대 차량 번호판")
+
+
+async def test_rebuttal_patch_rules(client, auth_headers, reported_case, settle):
+    await client.post(f"/cases/{reported_case}/rebuttal", headers=auth_headers)
+    await settle()
+    url = f"/cases/{reported_case}/rebuttal"
+
+    res = await client.patch(url, json={"recipient": "not-an-email"}, headers=auth_headers)
+    assert res.status_code == 422 and res.json()["error"]["code"] == "RECIPIENT_INVALID"
+
+    res = await client.patch(url, json={"recipient": "kim@insu.co.kr"}, headers=auth_headers)
+    assert res.status_code == 200 and res.json()["canSend"] is False and res.json()["blockedBy"] == ["claimNumber"]
+
+    res = await client.patch(url, json={"claimNumber": "2026-08-0000"}, headers=auth_headers)
+    body = res.json()
+    assert body["canSend"] is True and body["blockedBy"] == []
+    assert body["subject"] == "과실비율 재검토 요청 (접수번호 2026-08-0000)" and body["subjectAuto"] is True
+
+    res = await client.patch(url, json={"subject": "직접 쓴 제목"}, headers=auth_headers)
+    assert res.json()["subjectAuto"] is False
+    res = await client.patch(url, json={"claimNumber": "X-1"}, headers=auth_headers)
+    assert res.json()["subject"] == "직접 쓴 제목"
+
+    video_ref = body["attachments"][1]["refId"]
+    res = await client.patch(url, json={"attachments": [{"refId": video_ref, "included": False}]}, headers=auth_headers)
+    assert [a["included"] for a in res.json()["attachments"]] == [True, False]
+
+    res = await client.patch(url, json={"body": ""}, headers=auth_headers)
+    assert res.status_code == 422 and res.json()["error"]["code"] == "VALIDATION_FAILED"
+
+
+async def test_large_video_excluded_from_attachments(client, auth_headers, reported_case, settle, monkeypatch):
+    from app.services import rebuttal as rs
+
+    monkeypatch.setattr(rs, "MAX_ATTACH_BYTES", 1000)
+    await client.post(f"/cases/{reported_case}/rebuttal", headers=auth_headers)
+    await settle()
+    g2 = (await client.get(f"/cases/{reported_case}/rebuttal", headers=auth_headers)).json()
+    video = g2["attachments"][1]
+    assert video["included"] is False and video["note"] == "용량이 커서 첨부할 수 없어요"
+
+
+async def test_chat_create_rebuttal_action_locked_card(client, auth_headers, judged_case, settle):
+    await client.post(f"/cases/{judged_case}/messages", json={"text": "바로 반박의견서 보낼 수 있어요?"}, headers=auth_headers)
+    await settle()
+    msgs = (await client.get(f"/cases/{judged_case}/messages", params={"limit": 50}, headers=auth_headers)).json()["items"]
+    assert msgs[-1]["type"] == "rebuttal_locked" and msgs[-1]["payload"]["missing"] == ["report"]
