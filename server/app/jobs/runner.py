@@ -34,7 +34,11 @@ class JobRunner:
             job = Job(id=new_id(), case_id=case_id, kind=kind, status="running", started_at=now_utc())
             db.add(job)
             await db.commit()
-        await publish_case_updated(db, case_id)
+        # publish가 실패해도 task-less한 running Job을 남기지 않도록, 실패는 삼키고 태스크 생성으로 이어간다.
+        try:
+            await publish_case_updated(db, case_id)
+        except Exception:  # noqa: BLE001
+            log.exception("job %s (%s) 시작 알림 발행 실패 (case %s)", job.id, kind, case_id)
         task = asyncio.create_task(self._run(job.id, case_id, kind, handler), name=f"job:{kind}:{job.id}")
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
