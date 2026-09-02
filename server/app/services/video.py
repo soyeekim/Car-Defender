@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.clock import now_utc, to_kst_iso
 from app.config import get_settings
 from app.content.texts import NEED_DESCRIPTION_TEXT, VIDEO_NOTICE
+from app.errors import ApiError
 from app.ids import new_id
 from app.models import Case, Job, Message, Video
 from app.security import create_stream_token
@@ -95,6 +96,9 @@ def normalize_mime(raw: str | None) -> str:
 
 
 async def upload_video(db: AsyncSession, case: Case, upload: UploadFile) -> tuple[Video, Job | None, bool]:
+    # 다른 Job이 도는 중이면 아무것도 건드리지 않는다. 스풀링 뒤에 검사하면 이미 영상이 교체된 뒤다.
+    if await case_service.active_job(db, case.id) is not None:
+        raise ApiError("JOB_ALREADY_RUNNING")
     mime = normalize_mime(upload.content_type)
     video_id = new_id()
     key = video_key(case.id, video_id, mime)

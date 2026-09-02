@@ -1,4 +1,3 @@
-from app.services.verdict import perform_verdict
 from sqlalchemy import select
 
 from app.clock import now_utc
@@ -6,6 +5,7 @@ from app.db import session_scope
 from app.jobs.runner import runner
 from app.models import Analysis, Case, Video
 from app.services.cases import add_message
+from app.services.verdict import perform_verdict
 
 
 async def test_analysis_job_full_path(client, auth_headers, case_id, upload, sse):
@@ -76,3 +76,57 @@ async def test_perform_verdict_versions_and_cards(client, auth_headers, case_id,
     assert '"status": "judged"' in frames[1]
     assert '"version": 2' in frames[2] and '"changeReason": "상대' in frames[2]
     assert '"ratio": {"mine": 20, "other": 80}' in frames[3]
+
+
+async def test_analysis_failure_restores_status_and_posts_error_card(client, auth_headers, case_id, upload, settle, monkeypatch):
+    from app.agent.loader import get_agent
+    from app.errors import ERROR_CATALOG
+    from app.models import Job
+
+    async def boom(inp):
+        raise RuntimeError("agent down")
+
+    monkeypatch.setattr(get_agent()._impl, "analyze", boom)
+    async with session_scope() as db:
+        await add_message(db, case_id, "user", "text", {"text": "교차로에서 오토바이가 박았어요"}, publish=False)
+    assert (await upload()).json()["analysis"]["started"] is True
+    await settle()
+
+    detail = (await client.get(f"/cases/{case_id}", headers=auth_headers)).json()
+    assert detail["status"] == "intake"
+    assert detail["activeJob"] is None
+    assert detail["stages"]["analysis"] == {"state": "pending"}
+
+    msgs = (await client.get(f"/cases/{case_id}/messages", headers=auth_headers)).json()["items"]
+    assert msgs[-1]["type"] == "text" and msgs[-1]["role"] == "assistant"
+    assert msgs[-1]["payload"]["text"] == ERROR_CATALOG["INTERNAL_ERROR"].message
+    assert msgs[-1]["payload"]["cta"] is None  # 영상은 이미 있으니 업로드 CTA는 붙이지 않는다
+
+    async with session_scope() as db:
+        job = (await db.execute(select(Job).where(Job.case_id == case_id))).scalars().one()
+        assert job.kind == "analysis" and job.status == "failed"
+
+
+async def test_analysis_failure_is_retried_by_the_next_message(client, auth_headers, case_id, upload, settle, monkeypatch):
+    from app.agent.loader import get_agent
+
+    original = get_agent()._impl.analyze
+    calls = {"n": 0}
+
+    async def flaky(inp):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("agent down")
+        return await original(inp)
+
+    monkeypatch.setattr(get_agent()._impl, "analyze", flaky)
+    async with session_scope() as db:
+        await add_message(db, case_id, "user", "text", {"text": "교차로에서 오토바이가 박았어요"}, publish=False)
+    await upload()
+    await settle()
+
+    res = await client.post(f"/cases/{case_id}/messages", json={"text": "다시 해 주세요"}, headers=auth_headers)
+    assert res.status_code == 202
+    await settle()
+    detail = (await client.get(f"/cases/{case_id}", headers=auth_headers)).json()
+    assert detail["status"] == "needs_review" and calls["n"] == 2

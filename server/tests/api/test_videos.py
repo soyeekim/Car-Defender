@@ -259,3 +259,39 @@ async def test_stream_does_not_hold_db_session_while_sending(client, auth_header
     res = await client.get(meta["streamUrl"].removeprefix("/api/v1"))
     assert res.status_code == 200
     assert seen["checkedout"] == 0
+
+
+async def test_upload_rejected_while_another_job_runs(client, auth_headers, case_id, upload, settle):
+    import asyncio
+
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.jobs.runner import runner
+    from app.models import Video
+
+    v1 = (await upload(filename="a.mp4")).json()["video"]["id"]
+    await settle()
+
+    gate = asyncio.Event()
+
+    async def gated(db, cid, job_id):
+        await gate.wait()
+
+    async with session_scope() as db:
+        await runner.start(db, case_id, "report", gated)
+
+    try:
+        files = {"file": ("b.mp4", bytes(4096), "video/mp4")}
+        res = await client.post(f"/cases/{case_id}/videos", files=files, headers=auth_headers)
+        assert res.status_code == 409 and res.json()["error"]["code"] == "JOB_ALREADY_RUNNING"
+
+        detail = (await client.get(f"/cases/{case_id}", headers=auth_headers)).json()
+        assert detail["video"]["id"] == v1 and detail["video"]["filename"] == "a.mp4"
+        assert detail["status"] == "intake"
+        async with session_scope() as db:
+            rows = (await db.execute(select(Video).where(Video.case_id == case_id))).scalars().all()
+            assert [r.id for r in rows] == [v1]
+    finally:
+        gate.set()
+    await settle()

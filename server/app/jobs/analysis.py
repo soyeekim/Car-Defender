@@ -1,9 +1,12 @@
+import logging
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.base import AnalyzeInput
 from app.agent.loader import get_agent
 from app.clock import now_utc
+from app.errors import ERROR_CATALOG, ApiError
 from app.jobs.runner import runner
 from app.models import Analysis, Case, Job, Message
 from app.services import cases as case_service
@@ -11,14 +14,49 @@ from app.services.verdict import perform_verdict
 from app.services.video import attachment_payload
 from app.storage import get_storage
 
+log = logging.getLogger(__name__)
+
 
 async def start_analysis(db: AsyncSession, case: Case) -> Job:
+    previous = case.status
     case_service.set_status(case, "analyzing")
     await db.commit()
-    return await runner.start(db, case.id, "analysis", run_analysis)
+    try:
+        return await runner.start(db, case.id, "analysis", run_analysis)
+    except ApiError:
+        # Job을 못 띄웠으면 "분석중" 스피너만 남는다. 원래 상태로 되돌리고 실패를 그대로 올린다.
+        case_service.set_status(case, previous)
+        await db.commit()
+        raise
+
+
+async def _restore_after_failure(db: AsyncSession, case_id: str, previous: str) -> None:
+    """분석이 실패했을 때 스피너를 걷고 오류 카드를 남긴다. 여기서 또 실패해도 원래 예외를 가리지 않는다."""
+    try:
+        await db.rollback()
+        case = await db.get(Case, case_id)
+        if case is None:
+            return  # 사건이 지워졌으면 남길 곳도 없다
+        case_service.set_status(case, previous)
+        await db.commit()
+        await case_service.assistant_text(db, case_id, ERROR_CATALOG["INTERNAL_ERROR"].message)
+    except Exception:  # noqa: BLE001
+        log.exception("분석 실패 뒷정리에 실패했어요 (case %s)", case_id)
 
 
 async def run_analysis(db: AsyncSession, case_id: str, job_id: str) -> None:
+    case = await db.get(Case, case_id)
+    previous = case.status if case is not None else "intake"
+    if previous == "analyzing":
+        previous = "intake"  # 분석 전 상태로 돌아간다
+    try:
+        await _run_analysis(db, case_id, job_id)
+    except Exception:
+        await _restore_after_failure(db, case_id, previous)
+        raise  # 러너가 Job을 failed 로 기록하게 둔다
+
+
+async def _run_analysis(db: AsyncSession, case_id: str, job_id: str) -> None:
     case = await db.get(Case, case_id)
     video = await case_service.get_video(db, case_id)
     if case is None or video is None:
