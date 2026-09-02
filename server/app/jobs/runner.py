@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections import defaultdict
 from collections.abc import Awaitable, Callable
 
 from sqlalchemy import select, update
@@ -20,25 +21,31 @@ JobHandler = Callable[[AsyncSession, str, str], Awaitable[None]]
 class JobRunner:
     def __init__(self) -> None:
         self._tasks: set[asyncio.Task] = set()
+        self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def start(self, db: AsyncSession, case_id: str, kind: str, handler: JobHandler) -> Job:
-        if await active_job(db, case_id) is not None:
-            raise ApiError("JOB_ALREADY_RUNNING")
-        job = Job(id=new_id(), case_id=case_id, kind=kind, status="running", started_at=now_utc())
-        db.add(job)
-        await db.commit()
-        await publish_case_updated(db, case_id)
-        task = asyncio.create_task(self._run(job.id, case_id, kind, handler), name=f"job:{kind}:{job.id}")
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        return job
+        async with self._locks[case_id]:
+            if await active_job(db, case_id) is not None:
+                raise ApiError("JOB_ALREADY_RUNNING")
+            job = Job(id=new_id(), case_id=case_id, kind=kind, status="running", started_at=now_utc())
+            db.add(job)
+            await db.commit()
+            await publish_case_updated(db, case_id)
+            task = asyncio.create_task(self._run(job.id, case_id, kind, handler), name=f"job:{kind}:{job.id}")
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            return job
 
     async def _run(self, job_id: str, case_id: str, kind: str, handler: JobHandler) -> None:
         try:
             async with session_scope() as db:
                 await handler(db, case_id, job_id)
             async with session_scope() as db:
-                await db.execute(update(Job).where(Job.id == job_id).values(status="succeeded", ended_at=now_utc()))
+                await db.execute(
+                    update(Job)
+                    .where(Job.id == job_id, Job.status == "running")
+                    .values(status="succeeded", ended_at=now_utc())
+                )
                 await db.commit()
                 try:
                     await publish_case_updated(db, case_id)
@@ -49,7 +56,7 @@ class JobRunner:
             async with session_scope() as db:
                 await db.execute(
                     update(Job)
-                    .where(Job.id == job_id)
+                    .where(Job.id == job_id, Job.status == "running")
                     .values(status="failed", ended_at=now_utc(), error={"type": type(e).__name__, "message": str(e)})
                 )
                 await db.commit()

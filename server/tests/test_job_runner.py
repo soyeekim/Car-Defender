@@ -50,6 +50,31 @@ async def test_runner_rejects_second_job_while_running(app, case_id):
     await runner.wait_all()
 
 
+async def test_runner_start_is_race_safe_for_same_case(app, case_id):
+    runner = JobRunner()
+    gate = asyncio.Event()
+
+    async def handler(db, cid, job_id):
+        await gate.wait()
+
+    async with session_scope() as db1, session_scope() as db2:
+        results = await asyncio.gather(
+            runner.start(db1, case_id, "analysis", handler),
+            runner.start(db2, case_id, "verdict", handler),
+            return_exceptions=True,
+        )
+    successes = [r for r in results if isinstance(r, Job)]
+    errors = [r for r in results if isinstance(r, Exception)]
+    assert len(successes) == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], ApiError) and errors[0].code == "JOB_ALREADY_RUNNING"
+    async with session_scope() as db:
+        rows = (await db.execute(select(Job).where(Job.case_id == case_id))).scalars().all()
+        assert len(rows) == 1
+    gate.set()
+    await runner.wait_all()
+
+
 async def test_runner_marks_failed_and_publishes_case_updated(app, case_id):
     runner = JobRunner()
 
@@ -83,5 +108,8 @@ async def test_cleanup_stale(app, case_id):
     async with session_scope() as db:
         rows = (await db.execute(select(Job))).scalars().all()
         assert all(r.status == "failed" for r in rows)
+        job_id = rows[0].id
     gate.set()
     await runner.wait_all()
+    async with session_scope() as db:
+        assert (await db.get(Job, job_id)).status == "failed"
