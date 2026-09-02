@@ -67,3 +67,44 @@ async def test_keepalive_when_idle():
     frame = await asyncio.wait_for(it.__anext__(), timeout=1)
     assert frame == ": keepalive\n\n"
     await it.aclose()
+
+
+async def test_replay_does_not_duplicate_on_race_with_live_publish():
+    hub = Hub()
+    a = hub.publish("c1", "x", {"n": 1})
+    it = hub.subscribe("c1", last_event_id=a)
+    await it.__anext__()  # connected
+    hub.publish("c1", "x", {"n": 9})  # race: lands in buffer + queue before replay drains
+
+    seen = []
+    while True:
+        _, _, d = parse(await asyncio.wait_for(it.__anext__(), timeout=1))
+        seen.append(d)
+        if d.get("n") == 9:
+            break
+    assert sum(1 for d in seen if d.get("n") == 9) == 1
+
+    hub.publish("c1", "x", {"n": 10})
+    _, _, d = parse(await asyncio.wait_for(it.__anext__(), timeout=1))
+    assert d["n"] == 10
+    await it.aclose()
+
+
+async def test_prune_removes_empty_buffer_key():
+    now = [1000.0]
+    hub = Hub(clock=lambda: now[0], keepalive_seconds=0.01)
+    hub.publish("c1", "x", {"n": 1})
+    now[0] += 301
+    hub.publish("c2", "x", {"n": 2})  # prunes only c2's own key
+    assert hub.buffer_count("c1") == 1
+    assert "c1" in hub._buffers
+
+    it = hub.subscribe("c1", last_event_id="0")
+    await it.__anext__()  # connected
+    # generator resumes past connected here: prunes c1 (all stale), replays
+    # nothing, then idles into the keepalive loop
+    frame = await asyncio.wait_for(it.__anext__(), timeout=1)
+    assert frame == ": keepalive\n\n"
+    assert hub.buffer_count("c1") == 0
+    assert "c1" not in hub._buffers
+    await it.aclose()
