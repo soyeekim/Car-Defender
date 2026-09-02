@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 def test_env(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
-    monkeypatch.setenv("JWT_SECRET", "test-secret")
+    monkeypatch.setenv("JWT_SECRET", "test-secret-test-secret-test-secret-32b")
     monkeypatch.setenv("STORAGE_LOCAL_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("AGENT_IMPL", "builtins:object")
     monkeypatch.setenv("MAIL_BACKEND", "mock")
