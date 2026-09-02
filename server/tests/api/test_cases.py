@@ -94,3 +94,33 @@ async def test_rename_publishes_case_updated(client, auth_headers):
     frame = await it.__anext__()
     assert "event: case.updated" in frame and '"title": "바뀜"' in frame
     await it.aclose()
+
+
+async def test_delete_case_while_job_running_drops_subscribers_and_job_finishes(client, auth_headers):
+    from app.db import session_scope
+    from app.jobs.runner import runner
+
+    case_id = (await client.post("/cases", headers=auth_headers)).json()["id"]
+    gate = asyncio.Event()
+
+    async def gated(db, cid, job_id):
+        await gate.wait()
+
+    it = hub.subscribe(case_id)
+    await it.__anext__()  # connected
+    async with session_scope() as db:
+        await runner.start(db, case_id, "report", gated)
+    await it.__anext__()  # case.updated (Job 시작)
+
+    try:
+        assert (await client.delete(f"/cases/{case_id}", headers=auth_headers)).status_code == 204
+        assert hub.subscriber_count(case_id) == 0
+        assert hub.buffer_count(case_id) == 0
+    finally:
+        gate.set()
+
+    # 사건이 사라진 뒤에도 Job 마무리(마지막 case.updated 발행)는 조용히 끝나야 한다.
+    await asyncio.wait_for(runner.wait_all(), timeout=5)
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(it.__anext__(), timeout=1)
+    await it.aclose()

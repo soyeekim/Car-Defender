@@ -248,3 +248,28 @@ async def test_rebuttal_locked_missing_entries_are_stripped(client, auth_headers
     await settle()
     msgs = (await client.get(f"/cases/{case_id}/messages", headers=auth_headers)).json()["items"]
     assert msgs[-1]["payload"]["missing"] == ["verdict", "report"]
+
+
+async def test_rejudge_keeps_judged_status_while_verdict_job_runs(client, auth_headers, case_id, upload, settle, sse):
+    await send(client, auth_headers, case_id, "교차로에서 오토바이가 박았어요")
+    await settle()
+    await upload()
+    await settle()
+    await send(client, auth_headers, case_id, "우측 앞펜더요.")
+    await settle()
+    await send(client, auth_headers, case_id, "초록불이었어요.")
+    await settle()
+    detail = (await client.get(f"/cases/{case_id}", headers=auth_headers)).json()
+    assert detail["status"] == "judged" and detail["verdict"]["version"] == 1
+
+    tap = await sse(case_id)
+    await send(client, auth_headers, case_id, "다시 보니까 상대 신호가 황색이었던 것 같아요.")
+    frames = await tap.take(3)  # user text · assistant text · case.updated(재판정 Job 시작)
+    job_start = next(f for f in frames if "event: case.updated" in f)
+    assert '"status": "judged"' in job_start  # 재판정 중에도 판정 완료 상태를 유지한다
+    assert '"kind": "verdict"' in job_start and '"status": "running"' in job_start
+    assert '"verdictPlaceholder": null' in job_start  # v1 판정이 그대로 보인다
+
+    await settle()
+    detail = (await client.get(f"/cases/{case_id}", headers=auth_headers)).json()
+    assert detail["status"] == "judged" and detail["verdict"]["version"] == 2
