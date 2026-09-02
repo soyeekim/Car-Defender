@@ -27,16 +27,20 @@ async def _check_db() -> bool:
 def _check_storage(settings) -> bool:
     if settings.storage_backend == "s3":
         return bool(settings.s3_bucket)
+    probe = os.path.join(settings.storage_local_dir, ".health")
     try:
         os.makedirs(settings.storage_local_dir, exist_ok=True)
-        probe = os.path.join(settings.storage_local_dir, ".health")
         with open(probe, "w") as f:
             f.write("ok")
-        os.remove(probe)
         return True
     except OSError:
         log.exception("health: storage")
         return False
+    finally:
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
 
 
 def _check_agent(settings) -> bool:
