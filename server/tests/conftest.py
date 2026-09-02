@@ -9,17 +9,20 @@ def test_env(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
     monkeypatch.setenv("JWT_SECRET", "test-secret-test-secret-test-secret-32b")
     monkeypatch.setenv("STORAGE_LOCAL_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("AGENT_IMPL", "builtins:object")
+    monkeypatch.setenv("AGENT_IMPL", "app.agent.mock:MockAgent")
     monkeypatch.setenv("MAIL_BACKEND", "mock")
     monkeypatch.setenv("CORS_ORIGINS", "http://test")
+    from app.agent.loader import reset_agent
     from app.config import get_settings
     from app.mail import reset_mailer
 
     get_settings.cache_clear()
     reset_mailer()
+    reset_agent()
     yield
     get_settings.cache_clear()
     reset_mailer()
+    reset_agent()
 
 
 @pytest.fixture
