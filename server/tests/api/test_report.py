@@ -117,6 +117,43 @@ async def test_pdf_create_race_returns_existing_pdf(client, auth_headers, judged
     assert result_pdf.id == winner.id
 
 
+async def test_pdf_create_endpoint_survives_race_rollback(client, auth_headers, judged_case, settle, monkeypatch):
+    from app.clock import now_utc
+    from app.db import session_scope
+    from app.ids import new_id
+    from app.models import ReportPdf
+    from app.services import report as report_service
+
+    await client.post(f"/cases/{judged_case}/report", headers=auth_headers)
+    await settle()
+
+    async with session_scope() as db:
+        report = await report_service.report_by_version(db, judged_case, "latest")
+        winner = ReportPdf(
+            id=new_id(), report_id=report.id, storage_key=f"pdfs/{judged_case}/{report.id}.pdf",
+            filename="이미_있는.pdf", size_bytes=42, created_at=now_utc(),
+        )
+        db.add(winner)
+        await db.commit()
+        winner_id = winner.id
+
+    original_pdf_for = report_service.pdf_for
+    calls = {"n": 0}
+
+    async def fake_pdf_for(db_, report_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # 첫 조회 시점엔 아직 없었던 것처럼 흉내낸다 — INSERT가 유니크 제약에 걸리게 한다
+        return await original_pdf_for(db_, report_id)
+
+    monkeypatch.setattr(report_service, "pdf_for", fake_pdf_for)
+
+    # rollback 뒤에도 라우터가 pdf_response_dict(case, report, pdf)를 문제없이 만들어야 한다.
+    res = await client.post(f"/cases/{judged_case}/report/versions/1/pdf", headers=auth_headers)
+    assert res.status_code == 200
+    assert res.json()["pdfId"] == winner_id
+
+
 async def test_chat_create_report_action(client, auth_headers, judged_case, settle):
     await client.post(f"/cases/{judged_case}/messages", json={"text": "사건경위서 만들어 주세요"}, headers=auth_headers)
     await settle()

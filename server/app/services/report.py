@@ -122,6 +122,10 @@ async def ensure_pdf(db: AsyncSession, case: Case, report: Report) -> tuple[Repo
         # 동시에 두 요청이 같은 버전의 PDF를 만들면 report_id 유니크 제약이 걸린다.
         # 진 쪽은 자기 것을 버리고 먼저 커밋된 PDF를 그대로 돌려준다.
         await db.rollback()
+        # rollback은 세션에 붙은 객체를 모두 expire시킨다: 호출자가 이어서
+        # pdf_response_dict(case, report, pdf)를 쓸 수 있도록 여기서 새로고침해 둔다.
+        await db.refresh(report)
+        await db.refresh(case)
         existing = await pdf_for(db, report_id)
         if existing is not None:
             return existing, False
