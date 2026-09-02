@@ -203,7 +203,7 @@ class Agent(Protocol):
 
 - 모든 I/O는 Pydantic 모델. 반환값이 검증에 실패하면 Job은 `failed`. 백엔드는 재요청하지 않는다.
 - 동기 함수로 구현돼 있으면 `loader.py`가 `asyncio.to_thread`로 감싼다.
-- `judge`는 `precedents[].body_text`를 포함해 돌려준다. 백엔드는 `explain`을 직접 부르지 않는다 (E-2는 저장값을 읽는다).
+- `judge`는 `precedents[].body_text`(H37 팝업 본문)를 **반드시** 채워 돌려준다. 백엔드는 `explain`을 부르지 않으므로(선택 구현), 판정 시점에 비면 E-2 팝업은 제목만 남는다 — E-2는 저장값만 읽는다.
 - `MockAgent`(`app/agent/mock.py`)는 교차로 이륜차 신호위반 시연 사례의 고정 응답. 질문 2개 → 판정 0:100 → 정정 시 재판정 20:80. 기본값이며 테스트에 쓴다.
 - 영상은 로컬 경로로만 넘긴다. S3 백엔드일 때는 백엔드가 임시 파일로 내려받고 호출 후 삭제한다.
 - 나중에 AI 담당이 별도 프로세스가 되면 같은 Protocol을 구현한 `HttpAgent` 어댑터를 추가한다.

@@ -38,7 +38,13 @@ _RESULT_TYPES = {"analyze": AnalyzeResult, "chat": ChatResult, "judge": JudgeRes
 
 
 class AgentAdapter:
-    """AI 담당 구현체를 감싼다. 동기 함수면 스레드에서 돌리고, 반환값을 Pydantic으로 검증한다."""
+    """AI 담당 구현체를 감싼다. 동기 함수면 스레드에서 돌리고, 반환값을 Pydantic으로 검증한다.
+
+    계약 (자세히는 docs/agent-interface.md):
+    - `judge` 는 `basis.precedents[].body_text`(H37 판례 팝업 본문)를 채워서 돌려줘야 한다.
+      백엔드는 그 값을 판정에 저장하고, E-2(`GET /precedents/{id}`)는 저장값만 읽는다.
+    - `explain` 은 선택 구현이고 백엔드는 부르지 않는다. 판정 시점에 `body_text` 가 비면 채울 기회가 없다.
+    """
 
     def __init__(self, impl) -> None:
         self._impl = impl

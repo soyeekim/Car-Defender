@@ -12,9 +12,9 @@
 |---|---|---|---|
 | `analyze(AnalyzeInput)` | 영상 + 설명이 모여 분석 Job이 돌 때 | `video_path` `video_mime` `description`(유저 텍스트 메시지 전부 합침) | `summary_text`(H18 본문) `facts`(자유 JSON, 이후 호출에 그대로 돌아옴) `questions`(아래 "questions" 절 참고, 빈 리스트 = 질문 없이 바로 판정) `title`(사건 제목) `video_meta{speed_kph, impact_at_sec}` |
 | `chat(ChatInput)` | 사용자가 입력창에 글을 칠 때마다 | `messages`(최근 40건 text) `new_message` `facts` `questions` `verdict`(활성 판정 스냅샷) `has_video` `has_report` | `reply` `next_action`(`none`·`verdict`·`rejudge`·`create_report`·`create_rebuttal`) `fact_updates`(facts에 병합됨) |
-| `judge(JudgeInput)` | `next_action`이 `verdict`/`rejudge`일 때 | `messages` `facts` `previous_verdict` | `ratio_mine+ratio_other=100` `summary` `change_reason`(재판정 시) `opponent_claim` `basis{chart{name,note}, precedents[{id,title,body_text}]}` — `body_text`는 H37 팝업용 설명문 |
+| `judge(JudgeInput)` | `next_action`이 `verdict`/`rejudge`일 때 | `messages` `facts` `previous_verdict` | `ratio_mine+ratio_other=100` `summary` `change_reason`(재판정 시) `opponent_claim` `basis{chart{name,note}, precedents[{id,title,body_text}]}` — **`body_text`(H37 팝업 본문)는 `judge` 가 채워 보내야 한다** |
 | `write(WriteInput)` | 경위서·반박의견서 초안/다시 쓰기 | `kind` `messages` `facts` `verdict` `revision_request` `previous_sections` `report_sections` | report: `sections[4]{index,title,body}` `caveat` `page_count` / rebuttal: `body` |
-| `explain(ExplainInput)` | (선택) 백엔드는 현재 부르지 않음 | `precedent_id` `facts` | `body_text` |
+| `explain(ExplainInput)` | **선택 — 백엔드는 부르지 않는다** (구현하지 않아도 된다) | `precedent_id` `facts` | `body_text` |
 
 ## `questions` — 분석이 돌려주는 확인 질문
 
@@ -34,7 +34,12 @@
 
 ## `basis.precedents[].body_text`
 
-H37 판례 팝업에 그대로 보여 주는 설명문이다. 준비되지 않았으면 빈 문자열(기본값)이어도 되고,
-그때 팝업은 제목만 보여 준다. `basis.chart.note` 도 마찬가지로 생략 가능하다.
+H37 판례 팝업(E-2 `GET /api/v1/precedents/{precedentId}`)에 그대로 보여 주는 설명문이다.
+
+- **`judge` 가 판례마다 `body_text` 를 채워서 돌려주는 것이 계약이다.** 백엔드는 이 값을 판정에 그대로 저장하고,
+  팝업 요청이 오면 저장값을 읽어 보여 준다. **`explain(ExplainInput)` 은 선택 구현이며 백엔드는 절대 부르지 않는다** —
+  즉 판정 시점에 비워 두면 나중에 채울 방법이 없고, 팝업은 제목만 남는다.
+- 스키마 기본값이 빈 문자열이라 검증에서 막히지는 않지만, 빈 `body_text` 는 계약 위반으로 본다.
+- `basis.chart.note` 는 생략 가능하다.
 
 참고 구현: `app/agent/mock.py` (시연 시나리오 고정 응답).

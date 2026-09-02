@@ -59,6 +59,15 @@ async def test_mock_full_scenario():
     assert w2.body and w2.sections is None
 
 
+async def test_judge_fills_body_text_for_every_precedent():
+    """계약: judge 가 H37 팝업 본문(body_text)을 채워 준다. 백엔드는 explain 을 부르지 않는다."""
+    agent = MockAgent()
+    for previous in (None, VerdictSnapshot(version=1, ratio_mine=0, ratio_other=100, summary="s", opponent_claim=None, basis={})):
+        j = await agent.judge(JudgeInput(messages=[], facts={"opponent_signal": "yellow"}, previous_verdict=previous))
+        assert j.basis.precedents
+        assert all(p.body_text.strip() for p in j.basis.precedents)
+
+
 async def test_mock_chat_without_video_asks_for_upload():
     agent = MockAgent()
     c = await agent.chat(ChatInput(messages=[], new_message="어제 사고났어요", facts={}, questions=[], verdict=None, has_video=False, has_report=False))
