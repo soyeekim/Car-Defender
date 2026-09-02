@@ -10,10 +10,31 @@
 
 | 메서드 | 언제 | 입력 | 출력 |
 |---|---|---|---|
-| `analyze(AnalyzeInput)` | 영상 + 설명이 모여 분석 Job이 돌 때 | `video_path` `video_mime` `description`(유저 텍스트 메시지 전부 합침) | `summary_text`(H18 본문) `facts`(자유 JSON, 이후 호출에 그대로 돌아옴) `questions`(첫 질문은 `questions[0]`을 백엔드가 그대로 카드로 보냄) `title`(사건 제목) `video_meta{speed_kph, impact_at_sec}` |
+| `analyze(AnalyzeInput)` | 영상 + 설명이 모여 분석 Job이 돌 때 | `video_path` `video_mime` `description`(유저 텍스트 메시지 전부 합침) | `summary_text`(H18 본문) `facts`(자유 JSON, 이후 호출에 그대로 돌아옴) `questions`(아래 "questions" 절 참고, 빈 리스트 = 질문 없이 바로 판정) `title`(사건 제목) `video_meta{speed_kph, impact_at_sec}` |
 | `chat(ChatInput)` | 사용자가 입력창에 글을 칠 때마다 | `messages`(최근 40건 text) `new_message` `facts` `questions` `verdict`(활성 판정 스냅샷) `has_video` `has_report` | `reply` `next_action`(`none`·`verdict`·`rejudge`·`create_report`·`create_rebuttal`) `fact_updates`(facts에 병합됨) |
 | `judge(JudgeInput)` | `next_action`이 `verdict`/`rejudge`일 때 | `messages` `facts` `previous_verdict` | `ratio_mine+ratio_other=100` `summary` `change_reason`(재판정 시) `opponent_claim` `basis{chart{name,note}, precedents[{id,title,body_text}]}` — `body_text`는 H37 팝업용 설명문 |
 | `write(WriteInput)` | 경위서·반박의견서 초안/다시 쓰기 | `kind` `messages` `facts` `verdict` `revision_request` `previous_sections` `report_sections` | report: `sections[4]{index,title,body}` `caveat` `page_count` / rebuttal: `body` |
 | `explain(ExplainInput)` | (선택) 백엔드는 현재 부르지 않음 | `precedent_id` `facts` | `body_text` |
+
+## `questions` — 분석이 돌려주는 확인 질문
+
+- `questions[0]` 은 백엔드가 그대로 질문 카드 메시지로 사용자에게 보낸다.
+- `questions[1:]` 는 저장해 두었다가 이후 `chat(ChatInput)` 의 `questions` 로 매번 되돌려준다.
+  남은 질문을 언제 어떻게 물을지는 Agent 가 대화 흐름에서 정한다.
+- **빈 리스트는 "물어볼 것이 없다"는 뜻이다.** 질문 카드를 보내지 않고 바로 판정 단계로 넘어간다.
+  질문을 없애고 싶으면 `questions: []` 로 두면 된다.
+
+## `facts` — 사건 사실 누적본
+
+- JSON 직렬화 가능한 값만 담는다(dict / list / str / int / float / bool / null).
+  datetime, set, 커스텀 객체는 안 된다 — 저장 시 실패해 Job 이 실패한다.
+- `chat` 의 `fact_updates` 는 **얕게(shallow) 병합**된다: 최상위 키 단위로 덮어쓰고,
+  키 삭제는 없다. 중첩 dict 안의 일부만 바꾸려면 그 최상위 키의 전체 값을 다시 보내야 한다.
+- 매 호출마다 통째로 오가므로 작게 유지한다(요약된 사실 위주, 원문 전체 붙여넣기 금지).
+
+## `basis.precedents[].body_text`
+
+H37 판례 팝업에 그대로 보여 주는 설명문이다. 준비되지 않았으면 빈 문자열(기본값)이어도 되고,
+그때 팝업은 제목만 보여 준다. `basis.chart.note` 도 마찬가지로 생략 가능하다.
 
 참고 구현: `app/agent/mock.py` (시연 시나리오 고정 응답).

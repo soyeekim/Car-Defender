@@ -19,7 +19,7 @@ class Case(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     messages = relationship("Message", cascade="all, delete-orphan", passive_deletes=True)
-    videos = relationship("Video", cascade="all, delete-orphan", passive_deletes=True)
+    video = relationship("Video", cascade="all, delete-orphan", passive_deletes=True, uselist=False)
     analysis = relationship("Analysis", cascade="all, delete-orphan", passive_deletes=True, uselist=False)
     verdicts = relationship("Verdict", cascade="all, delete-orphan", passive_deletes=True)
     reports = relationship("Report", cascade="all, delete-orphan", passive_deletes=True)

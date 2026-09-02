@@ -1,9 +1,10 @@
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.clock import now_utc
 from app.db import session_scope
 from app.ids import new_id
-from app.models import Analysis, Case, Job, Message, SendLog, User, Verdict
+from app.models import Analysis, Case, Job, Message, SendLog, User, Verdict, Video
 
 
 async def _user(db):
@@ -56,3 +57,17 @@ async def test_json_columns_track_in_place_mutation(app):
         a = await db.get(Analysis, case_id)
         assert a.facts == {"a": 1, "k": "v"}
         assert a.questions == ["q1"]
+
+
+async def test_case_video_relationship_is_single(app):
+    async with session_scope() as db:
+        u = await _user(db)
+        c = Case(id=new_id(), user_id=u.id, title="새 사건", status="intake", created_at=now_utc(), updated_at=now_utc())
+        db.add(c)
+        db.add(Video(id=new_id(), case_id=c.id, filename="a.mp4", size_bytes=1, storage_key="k", created_at=now_utc()))
+        await db.commit()
+        case_id = c.id
+
+    async with session_scope() as db:
+        c = (await db.execute(select(Case).where(Case.id == case_id).options(selectinload(Case.video)))).scalar_one()
+        assert c.video is not None and c.video.filename == "a.mp4"

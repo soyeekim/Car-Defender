@@ -1,11 +1,14 @@
 from datetime import UTC, datetime
 
+from app.ids import new_id
+from app.models import Verdict
 from app.services.presenters import (
     compute_stages,
     ordinal_label,
     rebuttal_doc,
     report_doc,
     size_label,
+    verdict_payload,
 )
 
 
@@ -61,3 +64,14 @@ def test_rebuttal_doc_labels():
     assert rebuttal_doc(True, True, Reb("draft"), None) == {"exists": True, "locked": False, "label": "작성 중"}
     sent_at = datetime(2026, 8, 25, 5, 32, tzinfo=UTC)
     assert rebuttal_doc(True, True, Reb("sent"), sent_at)["label"] == "발송 완료 · 08-25 14:32"
+
+
+def test_verdict_payload_tolerates_missing_precedents():
+    v = Verdict(
+        id=new_id(), case_id=new_id(), version=1, ratio_mine=30, ratio_other=70,
+        summary="s", basis={"chart": {"name": "차11", "note": ""}, "precedents": None},
+        is_active=True, created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    body = verdict_payload(v)
+    assert body["basis"]["precedents"] == []
+    assert body["basis"]["chart"]["name"] == "차11"

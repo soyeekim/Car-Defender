@@ -74,7 +74,7 @@ def verdict_summary(v: Verdict | None) -> dict | None:
 
 def verdict_payload(v: Verdict) -> dict:
     basis = dict(v.basis or {})
-    precedents = [{"id": p.get("id"), "title": p.get("title")} for p in basis.get("precedents", [])]
+    precedents = [{"id": p.get("id"), "title": p.get("title")} for p in basis.get("precedents") or []]
     return {
         "verdictId": v.id,
         "version": v.version,

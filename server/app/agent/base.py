@@ -62,13 +62,13 @@ class ChatResult(BaseModel):
 
 class Chart(BaseModel):
     name: str
-    note: str
+    note: str = ""
 
 
 class Precedent(BaseModel):
     id: str
     title: str
-    body_text: str
+    body_text: str = ""  # H37 팝업 본문. 빈 문자열 허용
 
 
 class Basis(BaseModel):
