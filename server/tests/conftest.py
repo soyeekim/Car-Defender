@@ -81,6 +81,7 @@ async def _drain_jobs():
 
 @pytest.fixture(autouse=True)
 def _reset_actions():
+    import app.services.report  # noqa: F401  import 시점에 등록되는 실제 액션을 스냅샷에 포함시킨다
     from app.services import actions
 
     saved = dict(actions._registry)
@@ -170,6 +171,23 @@ class EventTap:
 
     async def close(self):
         await self._it.aclose()
+
+
+@pytest.fixture
+async def judged_case(client, auth_headers, case_id, upload, settle):
+    async def say(text):
+        r = await client.post(f"/cases/{case_id}/messages", json={"text": text}, headers=auth_headers)
+        assert r.status_code == 202, r.text
+        await settle()
+
+    await say("교차로에서 오토바이가 박았어요")
+    await upload()
+    await settle()
+    await say("우측 앞펜더요.")
+    await say("초록불이었어요.")
+    detail = (await client.get(f"/cases/{case_id}", headers=auth_headers)).json()
+    assert detail["status"] == "judged", detail
+    return case_id
 
 
 @pytest.fixture
