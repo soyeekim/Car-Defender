@@ -176,6 +176,7 @@ async def test_flush_failure_rolls_back_and_still_sends_error_card(client, auth_
 
 async def test_chat_timeout_sends_internal_error_card(client, auth_headers, case_id, upload, settle, monkeypatch):
     import asyncio
+    import time
 
     from app.agent.loader import get_agent
     from app.config import get_settings
@@ -189,16 +190,26 @@ async def test_chat_timeout_sends_internal_error_card(client, auth_headers, case
 
     monkeypatch.setattr(get_settings(), "job_timeout_seconds", 0.05)
 
+    cancelled = []
+
     async def slow_chat(inp):
-        await asyncio.sleep(1)
-        raise AssertionError("timeout이 이 지점 전에 취소했어야 해요")
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
 
     monkeypatch.setattr(get_agent()._impl, "chat", slow_chat)
 
+    started = time.monotonic()
     await send(client, auth_headers, case_id, "우측 앞펜더요.")
     await settle()
+    elapsed = time.monotonic() - started
+
     msgs = (await client.get(f"/cases/{case_id}/messages", headers=auth_headers)).json()["items"]
     assert msgs[-1]["payload"]["text"] == ERROR_CATALOG["INTERNAL_ERROR"].message
+    assert cancelled == [True]
+    assert elapsed < 2
 
 
 async def test_chat_wait_all_with_timeout_cancels_stuck_task():
