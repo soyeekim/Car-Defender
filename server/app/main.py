@@ -1,8 +1,10 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app import db
 from app.api import health
 from app.config import get_settings
 from app.errors import register_error_handlers
@@ -10,7 +12,15 @@ from app.errors import register_error_handlers
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = get_settings()
+    if settings.database_url.startswith("sqlite"):
+        path = settings.database_url.split("///", 1)[-1]
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    db.configure_database(settings.database_url)
+    if settings.app_env == "test":
+        await db.create_all()
     yield
+    await db.dispose()
 
 
 def create_app() -> FastAPI:
