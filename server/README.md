@@ -21,6 +21,12 @@ docker compose up -d db         # Postgres만
 .venv/Scripts/python -m pytest
 ```
 
+## 코드 검사
+
+```bash
+.venv/Scripts/python -m ruff check .
+```
+
 ## 배포 (EC2 한 대)
 
 ```bash
@@ -33,6 +39,12 @@ curl localhost/api/v1/health
 접속 IP 신뢰가 의미를 가진다. 로컬에서 `psql`로 직접 DB에 붙어야 한다면
 `docker-compose.yml`의 `db` 서비스에 `ports: - "127.0.0.1:5432:5432"`처럼
 루프백에만 바인딩해서 임시로 연다.
+
+`Dockerfile`의 `uvicorn --workers 1`은 그냥 기본값이 아니라 필수 조건이다.
+레이트리밋(`app/ratelimit.py`)과 SSE 허브가 프로세스 메모리에 상태를 들고 있어서,
+워커가 여러 개면 요청마다 다른 워커로 흩어져 레이트리밋이 우회되고 SSE 구독이
+끊길 수 있다. 수평 확장이 필요하면 워커 수를 늘리는 대신 컨테이너를 여러 개
+띄우고 그 상태를 Redis 같은 공유 저장소로 옮겨야 한다.
 
 ## 환경 변수
 

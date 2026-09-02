@@ -1,5 +1,5 @@
 from app.config import get_settings
-from app.mail.base import Mailer, MailMessage, MailAttachment, MailSendError
+from app.mail.base import MailAttachment, Mailer, MailMessage, MailSendError
 
 _mailer: Mailer | None = None
 

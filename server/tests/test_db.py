@@ -1,9 +1,9 @@
 from sqlalchemy import select
 
+from app.clock import now_utc
 from app.db import session_scope
 from app.ids import new_id
 from app.models import User
-from app.clock import now_utc
 
 
 async def test_can_insert_and_read_user(app):
