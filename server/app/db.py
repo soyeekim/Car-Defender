@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -25,6 +26,11 @@ def configure_database(url: str) -> None:
         kwargs["connect_args"] = {"timeout": 30}
     _engine = create_async_engine(url, pool_pre_ping=True, **kwargs)
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
+
+    if url.startswith("sqlite"):
+        @event.listens_for(_engine.sync_engine, "connect")
+        def _fk_on(dbapi_conn, _):
+            dbapi_conn.execute("PRAGMA foreign_keys=ON")
 
 
 def engine() -> AsyncEngine:
