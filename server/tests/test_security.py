@@ -70,3 +70,10 @@ def test_opaque_token_hash():
     assert len(raw) >= 32
     assert hash_token(raw) == hash_token(raw)
     assert hash_token(raw) != hash_token(generate_opaque_token())
+
+
+def test_is_email_rejects_absurdly_long_addresses():
+    """Postgres의 users.email은 varchar(320)이다. 길이를 여기서 막아야 write 시점에 터지지 않는다."""
+    assert is_email("a" * 308 + "@example.com")  # 320자 = 경계값, 통과
+    assert not is_email("a" * 309 + "@example.com")  # 321자
+    assert not is_email("a" * 10000 + "@example.com")

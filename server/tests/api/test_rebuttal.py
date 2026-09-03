@@ -153,3 +153,19 @@ async def test_rebuttal_empty_subject_restores_auto_subject(client, auth_headers
     # 자동 제목이 다시 켜졌으니 접수번호를 바꾸면 제목도 따라 바뀐다
     res = await client.patch(url, json={"claimNumber": "X-1"}, headers=auth_headers)
     assert res.json()["subject"] == "과실비율 재검토 요청 (접수번호 X-1)"
+
+
+async def test_rebuttal_patch_bounds_user_strings(client, auth_headers, reported_case, settle):
+    """DB 칼럼 상한(claim_number varchar(64) · recipient varchar(320))을 넘는 값은 422로 막는다.
+    Postgres에서는 잘리지 않고 write가 통째로 실패하기 때문이다."""
+    await client.post(f"/cases/{reported_case}/rebuttal", headers=auth_headers)
+    await settle()
+    url = f"/cases/{reported_case}/rebuttal"
+
+    res = await client.patch(url, json={"claimNumber": "9" * 65}, headers=auth_headers)
+    assert res.status_code == 422 and res.json()["error"]["code"] == "VALIDATION_FAILED"
+    assert (await client.patch(url, json={"claimNumber": "9" * 64}, headers=auth_headers)).status_code == 200
+
+    long_email = "a" * 320 + "@example.com"
+    res = await client.patch(url, json={"recipient": long_email}, headers=auth_headers)
+    assert res.status_code == 422 and res.json()["error"]["code"] == "VALIDATION_FAILED"

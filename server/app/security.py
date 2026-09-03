@@ -11,10 +11,12 @@ from app.config import get_settings
 from app.errors import ApiError
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+MAX_EMAIL_LENGTH = 320  # users.email · rebuttals.recipient · send_logs.recipient 칼럼 길이와 같다
 
 
 def is_email(value: str | None) -> bool:
-    return bool(value) and EMAIL_RE.match(value) is not None
+    # 길이도 함께 본다: Postgres는 varchar 상한을 넘는 값을 자르지 않고 write 자체를 실패시킨다.
+    return bool(value) and len(value) <= MAX_EMAIL_LENGTH and EMAIL_RE.match(value) is not None
 
 
 def password_policy_ok(raw: str | None) -> bool:

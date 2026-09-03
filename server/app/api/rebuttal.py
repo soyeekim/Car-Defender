@@ -11,6 +11,8 @@ from app.services import rebuttal as rebuttal_service
 
 router = APIRouter(prefix="/cases/{case_id}/rebuttal", tags=["rebuttal"])
 
+MAX_IDEMPOTENCY_KEY_LENGTH = 64  # send_logs.idempotency_key 칼럼 길이
+
 
 async def _rebuttal_or_404(db, case_id):
     r = await case_service.get_rebuttal(db, case_id)
@@ -41,6 +43,9 @@ async def send(
     case: Case = Depends(owned_case), user: User = Depends(current_user), db: AsyncSession = Depends(get_db),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict:
+    # send_logs.idempotency_key는 varchar(64)다. 더 긴 키는 기록 시점에 write가 통째로 실패하니 여기서 막는다.
+    if idempotency_key is not None and len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH:
+        raise ApiError("VALIDATION_FAILED", fields={"Idempotency-Key": "키가 너무 길어요 (최대 64자)."})
     rebuttal = await _rebuttal_or_404(db, case.id)
     return await rebuttal_service.send(db, case, rebuttal, user, idempotency_key)
 

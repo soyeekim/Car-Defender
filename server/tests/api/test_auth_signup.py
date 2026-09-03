@@ -74,3 +74,9 @@ async def test_email_available_bad_format(client):
     res = await client.get("/auth/email-available", params={"email": "nope"})
     assert res.status_code == 422
     assert res.json()["error"]["code"] == "AUTH_EMAIL_FORMAT"
+
+
+async def test_signup_rejects_over_long_email(client):
+    res = await client.post("/auth/signup", json={**VALID, "email": "a" * 400 + "@example.com"})
+    assert res.status_code == 422
+    assert res.json()["error"]["code"] == "AUTH_EMAIL_FORMAT"

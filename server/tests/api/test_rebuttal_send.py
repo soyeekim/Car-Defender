@@ -497,3 +497,17 @@ async def test_send_reset_stuck_sending_on_fresh_app_start(test_env):
     async with session_scope() as db:
         rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
         assert rebuttal.status == "draft"
+
+
+async def test_send_rejects_over_long_idempotency_key(client, auth_headers, reported_case, settle):
+    """send_logs.idempotency_key는 varchar(64)다. 더 긴 키는 기록 시점에 터지므로 미리 막는다."""
+    await ready(client, auth_headers, reported_case, settle)
+    h = {**auth_headers, "Idempotency-Key": "k" * 65}
+    res = await client.post(f"/cases/{reported_case}/rebuttal/send", headers=h)
+    assert res.status_code == 422
+    err = res.json()["error"]
+    assert err["code"] == "VALIDATION_FAILED"
+    assert err["fields"] == {"Idempotency-Key": "키가 너무 길어요 (최대 64자)."}
+
+    ok = {**auth_headers, "Idempotency-Key": "k" * 64}
+    assert (await client.post(f"/cases/{reported_case}/rebuttal/send", headers=ok)).status_code == 200
