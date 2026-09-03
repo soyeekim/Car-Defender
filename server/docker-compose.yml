@@ -16,6 +16,9 @@ services:
       retries: 10
 
   app:
+    # 로컬에서는 build 결과에 이 태그가 붙고, EC2에서는 .env의 APP_IMAGE가 가리키는
+    # 레지스트리 이미지를 받아 쓴다 (docker compose pull && up -d --no-build).
+    image: ${APP_IMAGE:-cardefender-app:local}
     build: .
     env_file: .env
     environment:

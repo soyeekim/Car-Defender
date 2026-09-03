@@ -36,11 +36,39 @@ mkdir -p data                      # SQLite 파일과 업로드가 여기 쌓인
 
 ## 배포 (EC2 한 대)
 
+### 서버에서 직접 빌드
+
+인스턴스 메모리가 넉넉할 때만 쓴다.
+
 ```bash
 cp .env.example .env   # JWT_SECRET을 긴 랜덤 값으로, APP_ENV=prod 로 바꾼다
 docker compose up -d --build
 curl localhost/api/v1/health
 ```
+
+### 이미지를 레지스트리로 넘기기 (권장)
+
+t3.micro처럼 메모리 1GB인 인스턴스에서는 빌드가 무겁다(`pip install` 레이어만
+196MB). 빌드는 개발 PC에서 하고 서버는 받아서 실행만 한다.
+
+```bash
+# 개발 PC
+docker build -t <계정>/cardefender-app:v1 .
+docker push <계정>/cardefender-app:v1
+
+# EC2 (.env에 APP_IMAGE=<계정>/cardefender-app:v1 를 추가한 뒤)
+docker login                      # 비공개 저장소일 때만
+docker compose pull
+docker compose up -d --no-build
+```
+
+`docker-compose.yml`의 `app.image`는 `${APP_IMAGE:-cardefender-app:local}`이다.
+`.env`에 `APP_IMAGE`가 없으면 로컬 빌드 태그를 쓰고, 있으면 그 이미지를 받아 쓴다.
+
+`Dockerfile`은 의존성 설치를 코드 복사보다 먼저 한다. 그래서 코드만 고친 배포는
+5MB짜리 레이어 하나만 다시 만들어 올린다. 순서를 되돌리면 매번 196MB를 다시
+올리게 되므로 그대로 둔다. editable 설치가 빌드 시점에 `app` 패키지를 찾아야 해서
+빈 `app/__init__.py`를 먼저 만들고 실제 코드로 덮어쓰는 구조다.
 
 `app` 서비스는 `env_file: .env`로 이 파일을 읽으므로 `.env`가 반드시 있어야 한다.
 `DATABASE_URL`은 compose의 `app` 서비스가
