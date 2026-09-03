@@ -1,9 +1,10 @@
 import logging
+from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clock import now_utc
+from app.clock import ensure_aware, now_utc
 from app.content.texts import GUIDE_CARD, UPLOAD_CTA
 from app.errors import ApiError
 from app.ids import new_id
@@ -36,7 +37,15 @@ async def get_owned_case(db: AsyncSession, user: User, case_id: str) -> Case:
 
 
 def touch(case: Case) -> None:
-    case.updated_at = now_utc()
+    """updated_at을 '항상 커지는' 값으로 갱신한다.
+
+    사건 목록은 updated_at 내림차순이라 "방금 만진 사건이 맨 위"가 계약이다. 그런데 시계 해상도가
+    거칠면(윈도우는 종종 ~15ms) 연달아 일어난 두 갱신이 같은 값으로 찍혀 순서가 뒤집힌다.
+    같거나 뒤로 가는 값이면 1마이크로초를 더해 단조 증가를 보장한다."""
+    now = now_utc()
+    if case.updated_at is not None and now <= ensure_aware(case.updated_at):
+        now = ensure_aware(case.updated_at) + timedelta(microseconds=1)
+    case.updated_at = now
 
 
 def set_status(case: Case, status: str) -> None:

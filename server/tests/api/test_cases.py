@@ -124,3 +124,30 @@ async def test_delete_case_while_job_running_drops_subscribers_and_job_finishes(
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(it.__anext__(), timeout=1)
     await it.aclose()
+
+
+async def test_touched_case_is_always_on_top_even_on_a_coarse_clock(client, auth_headers):
+    """목록은 updated_at 내림차순이다. 시계 해상도가 거칠어(윈도우는 종종 ~15ms) 두 사건의
+    updated_at이 같은 값으로 찍히면 '방금 만진 사건이 위'라는 규칙이 깨진다.
+    touch()가 항상 증가하는 값을 쓰는지 반복해서 확인한다."""
+    for _ in range(20):
+        a = (await client.post("/cases", headers=auth_headers)).json()["id"]
+        b = (await client.post("/cases", headers=auth_headers)).json()["id"]
+        await client.patch(f"/cases/{a}", json={"title": "방금 고침"}, headers=auth_headers)
+        items = (await client.get("/cases", headers=auth_headers)).json()["items"]
+        assert [i["id"] for i in items[:2]] == [a, b]
+
+
+async def test_touch_never_repeats_or_moves_backwards():
+    """touch()는 같은 값을 두 번 쓰지 않는다 (단위 수준 확인)."""
+    from app.clock import ensure_aware, now_utc
+    from app.models import Case
+    from app.services.cases import touch
+
+    case = Case(id="x", user_id="u", title="t", status="intake", created_at=now_utc(), updated_at=now_utc())
+    stamps = []
+    for _ in range(200):
+        touch(case)
+        stamps.append(ensure_aware(case.updated_at))
+    assert stamps == sorted(stamps)
+    assert len(set(stamps)) == len(stamps)
