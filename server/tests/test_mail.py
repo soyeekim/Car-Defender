@@ -49,7 +49,9 @@ async def test_smtp_mailer_headers(monkeypatch):
     parsed = email.message_from_bytes(captured["msg"].as_bytes(), policy=email.policy.default)
     assert parsed["From"].addresses[0].display_name == "Fairway (hyun@example.com)"
     assert parsed["From"].addresses[0].addr_spec == "no-reply@fairway.click"
-    assert parsed["Sender"] == "hyun@example.com"
+    # SES가 Sender 주소도 검증된 자격 증명일 것을 요구하므로 이 헤더는 넣지 않는다.
+    # 사용자 주소는 Reply-To와 From의 display name으로만 드러난다.
+    assert parsed["Sender"] is None
     assert parsed["Reply-To"] == "hyun@example.com"
     assert parsed["Subject"] == "과실비율 재검토 요청 (접수번호 2026-08-0000)"
     assert parsed["To"] == "kim@insu.co.kr"

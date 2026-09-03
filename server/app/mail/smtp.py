@@ -21,8 +21,10 @@ class SmtpMailer:
         em["From"] = Address(display_name=display, addr_spec=self.s.mail_from)
         em["To"] = msg.to
         em["Subject"] = msg.subject
-        if msg.sender_email:
-            em["Sender"] = msg.sender_email
+        # 명세 §8.1은 Sender 헤더에 가입 이메일을 넣으라고 했지만 SES는 Sender 주소도
+        # 검증된 자격 증명일 것을 요구한다(554 Email address is not verified).
+        # 사용자 주소를 전부 SES에 등록할 수는 없으므로 헤더를 넣지 않는다.
+        # 회신 경로는 Reply-To가, 보낸 사람 표시는 From의 display name이 담당한다.
         if msg.reply_to:
             em["Reply-To"] = msg.reply_to
         message_id = make_msgid(domain=self.s.mail_from.split("@")[-1])
