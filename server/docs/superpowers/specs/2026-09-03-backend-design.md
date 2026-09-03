@@ -16,7 +16,7 @@
 | Agent | **AI 담당이 만든 파이썬 패키지를 같은 프로세스에서 import해 호출**. 백엔드는 Protocol(인터페이스)과 Mock만 가짐 |
 | 객체 스토리지 | `StorageBackend` 인터페이스. `local`(기본) / `s3` 환경 변수 전환 |
 | 메일 | SMTP(aiosmtplib). 개발용 `mock` 백엔드 |
-| PDF | fpdf2 + Pretendard TTF 내장 |
+| PDF | fpdf2 + NanumGothic(OFL) TTF 내장 |
 | 인증 | JWT(HS256) 30분 access · 불투명 refresh 토큰 14일(DB 해시 저장, httpOnly 쿠키) · bcrypt |
 | 저장소 루트 | `C:\finance ai challenge\server` (= git 루트). 설계 문서 폴더(`금융 ai 디자인/`)는 저장소 밖 참조용 |
 | 커밋 형식 | Conventional Commits · 타입 영어 + 요약 한국어 · **Claude 관련 트레일러 없음** |
@@ -57,7 +57,7 @@ server/
     agent/                  base.py(Protocol + I/O 모델) · loader.py · mock.py
     storage/                base.py · local.py · s3.py
     mail/                   base.py · smtp.py · mock.py · templates.py
-    pdf/                    report_pdf.py · fonts/Pretendard-Regular.ttf, Pretendard-Bold.ttf
+    pdf/                    report_pdf.py · fonts/NanumGothic-Regular.ttf, NanumGothic-Bold.ttf, OFL.txt
     content/                guide 문구 · 약관 3종 markdown · 고정 안내문 · 라벨
     seed.py                 시드 데이터 (closed 사건 1건)
   tests/
@@ -218,12 +218,13 @@ class Agent(Protocol):
 - 업로드: `UploadFile`을 청크로 스토리지에 저장 → `ffprobe -show_format -show_streams`로 `duration`·`creation_time` 추출(없으면 `recorded_at=null`) → 기존 영상 있으면 교체 → `video_attachment`(role user) 카드 → 유저 text가 1건 이상이면 analysis Job, 아니면 고정 문구 text 카드.
 - 스트리밍: `Range` 헤더 파싱 → `206` + `Content-Range` + `Accept-Ranges` + `Cache-Control: private, no-store`. Range 없으면 `200` 전체.
 - 서버 본문 제한은 nginx `client_max_body_size 256m`. 앱은 거절하지 않는다.
+- 업로드는 사건에 진행 중인 Job(종류 무관)이 있으면 `JOB_ALREADY_RUNNING`으로 거절한다.
 
 ---
 
 ## 8. 문서 생성·메일
 
-- **PDF** (`pdf/report_pdf.py`): fpdf2. Pretendard Regular/Bold 등록. 제목 `사건경위서`, 사건 제목·날짜, 4개 절, 하단 고지 문구. `page_count`는 생성 후 실제 페이지 수로 `reports.page_count`를 덮어쓴다. 파일명 `사건경위서_{사건제목}_{YYYYMMDD}.pdf`(제목의 파일 금지 문자는 `_`로).
+- **PDF** (`pdf/report_pdf.py`): fpdf2. NanumGothic(OFL) Regular/Bold 등록. 제목 `사건경위서`, 사건 제목·날짜, 4개 절, 하단 고지 문구. `page_count`는 생성 후 실제 페이지 수로 `reports.page_count`를 덮어쓴다. 파일명 `사건경위서_{사건제목}_{YYYYMMDD}.pdf`(제목의 파일 금지 문자는 `_`로).
 - **메일** (`mail/`): `Mailer.send(MailMessage) → provider_message_id`. `smtp`는 aiosmtplib(STARTTLS/SSL 환경 변수), `mock`은 로그 출력 + 가짜 ID. 헤더는 명세 §8.1 그대로(`From: "카-디펜더 ({email})" <MAIL_FROM>`, `Sender`·`Reply-To`=가입 이메일). 본문 말미 고정 문구 추가. 첨부 합계 25MB 초과면 영상 제외 + 안내 한 줄.
 - **발송 (G-4)**: `Idempotency-Key` 없으면 400 → 같은 키의 `send_logs` 있으면 그 결과 반환 → 검증(recipient·claimNumber·status) → 메일 동기 발송 → 성공: `rebuttals.status=sent` · `send_logs` INSERT · `sent` 카드 · `rebuttal.sent` · `case.updated`(sent). 실패: `send_logs`에 `result=failed` 기록 후 `MAIL_SEND_FAILED` 502. 실패 기록은 G-5 목록에서 `result: failed`로 보인다.
 - `Rebuttal.status`에 일시적 `sending` 상태가 있으며 클라이언트에는 `editable=false`로만 보인다; 서버 재시작 시 `draft`로 복구.

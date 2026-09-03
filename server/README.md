@@ -10,6 +10,7 @@ py -3.11 -m venv .venv
 cp .env.example .env            # 값 수정
 docker compose up -d db         # Postgres만
 .venv/Scripts/python -m alembic upgrade head
+.venv/Scripts/python -m app.seed   # 데모 데이터: demo@cardefender.kr / demo1234 (종결 사건 1건)
 .venv/Scripts/python -m uvicorn app.main:app --reload
 ```
 
@@ -52,3 +53,10 @@ curl localhost/api/v1/health
 ## 환경 변수
 
 `.env.example` 참고. `AGENT_IMPL`은 `패키지.모듈:클래스` 형식으로 AI 담당 구현체를 가리킨다. 기본값은 `app.agent.mock:MockAgent`.
+
+## AI 담당 연동
+
+AI 담당은 `app/agent/base.py`의 Protocol을 구현한 파이썬 클래스를 만들고, `AGENT_IMPL` 환경 변수로
+그 클래스를 가리키면 된다(기본값은 데모용 `app.agent.mock:MockAgent`). 입출력 계약·필수 필드
+(`judge`는 `basis.precedents[].body_text`를 반드시 채워야 한다)·에러 처리 규칙은
+`docs/agent-interface.md`에 정리돼 있다.
