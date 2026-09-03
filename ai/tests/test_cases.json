@@ -1,0 +1,42 @@
+[
+  {
+    "case_id": "case_1_rear_end",
+    "title": "후방추돌",
+    "initial_input": "빨간불이라 정차했는데 뒤차가 받았습니다.",
+    "expected_family": "rear_end",
+    "check_points": ["사고 장소", "신호", "정차 이유", "급정거 여부", "충돌 부위"],
+    "expected_active_slots": ["pre_collision_sudden_braking", "braking_reason", "ego_collision_area"]
+  },
+  {
+    "case_id": "case_2_intersection_straight_vs_left_turn",
+    "title": "교차로 직진-좌회전",
+    "initial_input": "교차로에서 직진하는데 맞은편 차가 좌회전하다가 받았습니다.",
+    "expected_family": "intersection_collision",
+    "check_points": ["신호등 유무", "자차 신호", "상대방 신호", "좌회전 신호/비보호 여부", "충돌 부위"],
+    "expected_active_slots": ["place_signal_presence", "ego_collision_area"]
+  },
+  {
+    "case_id": "case_3_lane_change",
+    "title": "차선 변경",
+    "initial_input": "상대차가 갑자기 제 차선으로 들어오면서 부딪혔습니다.",
+    "expected_family": "lane_change",
+    "check_points": ["사고 장소", "방향지시등", "차선 변경 방향", "충돌 부위", "정차/진행 상태"],
+    "expected_active_slots": ["turn_signal", "lane_change_direction", "ego_lane", "opponent_lane"]
+  },
+  {
+    "case_id": "case_4_vehicle_pedestrian",
+    "title": "차대보행자",
+    "initial_input": "횡단보도에서 사람이랑 사고가 났습니다.",
+    "expected_family": "vehicle_pedestrian",
+    "check_points": ["횡단보도 신호등", "차량 신호", "보행자 신호", "보행자 횡단 상태", "차량 속도"],
+    "expected_active_slots": ["place_signal_presence", "pedestrian_crossing_state", "ego_speed"]
+  },
+  {
+    "case_id": "case_5_vehicle_motorcycle",
+    "title": "차대이륜차",
+    "initial_input": "교차로에서 오토바이와 부딪혔습니다.",
+    "expected_family": "intersection_collision",
+    "check_points": ["신호등 유무", "각 당사자 진행 방향", "각 당사자 신호", "차선 위치", "충돌 부위"],
+    "expected_active_slots": ["place_signal_presence", "ego_lane", "opponent_lane", "ego_collision_area"]
+  }
+]
