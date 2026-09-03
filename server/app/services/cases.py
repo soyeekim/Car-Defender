@@ -1,5 +1,5 @@
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,16 +36,33 @@ async def get_owned_case(db: AsyncSession, user: User, case_id: str) -> Case:
     return case
 
 
-def touch(case: Case) -> None:
-    """updated_at을 '항상 커지는' 값으로 갱신한다.
+_last_stamp: datetime | None = None
 
-    사건 목록은 updated_at 내림차순이라 "방금 만진 사건이 맨 위"가 계약이다. 그런데 시계 해상도가
-    거칠면(윈도우는 종종 ~15ms) 연달아 일어난 두 갱신이 같은 값으로 찍혀 순서가 뒤집힌다.
-    같거나 뒤로 가는 값이면 1마이크로초를 더해 단조 증가를 보장한다."""
+
+def next_stamp(previous: datetime | None = None) -> datetime:
+    """사건 목록 정렬에 쓰는, 프로세스 안에서 같은 값을 두 번 주지 않는 UTC 시각.
+
+    목록은 `updated_at DESC, id DESC`라서 "방금 만진 사건이 맨 위"가 계약이다. 그런데 시계 해상도가
+    거칠면(윈도우는 종종 ~15ms) 서로 다른 두 사건의 시각이 같은 값으로 찍히고, 그러면 두 번째
+    정렬 키(id 내림차순)가 이겨서 "나중에 만든 사건"이 "방금 만진 사건"보다 위로 올라간다.
+    그래서 이 함수가 발급하는 값은 (1) 직전에 발급한 값보다 크고 (2) 그 행의 기존 값보다 크다.
+    같거나 뒤로 가면 1마이크로초를 더한다 — 실시간과의 오차는 발급 횟수 × 1µs로 사실상 없다.
+
+    프로세스 단위 상태다. 레이트리밋·SSE 허브와 마찬가지로 `uvicorn --workers 1` 전제 위에 있다."""
+    global _last_stamp
     now = now_utc()
-    if case.updated_at is not None and now <= ensure_aware(case.updated_at):
-        now = ensure_aware(case.updated_at) + timedelta(microseconds=1)
-    case.updated_at = now
+    floor = _last_stamp
+    if previous is not None:
+        prev = ensure_aware(previous)
+        floor = prev if floor is None or prev > floor else floor
+    if floor is not None and now <= floor:
+        now = floor + timedelta(microseconds=1)
+    _last_stamp = now
+    return now
+
+
+def touch(case: Case) -> None:
+    case.updated_at = next_stamp(case.updated_at)
 
 
 def set_status(case: Case, status: str) -> None:
@@ -54,7 +71,9 @@ def set_status(case: Case, status: str) -> None:
 
 
 async def create_case(db: AsyncSession, user: User) -> Case:
-    now = now_utc()
+    # 생성 시각도 같은 발급기를 쓴다. 안 그러면 "직전에 만든 사건"과 "방금 만진 사건"의
+    # updated_at이 같은 값으로 찍혀(거친 시계) 목록 순서가 뒤집힌다.
+    now = next_stamp()
     case = Case(id=new_id(), user_id=user.id, title="새 사건", status="intake", created_at=now, updated_at=now)
     db.add(case)
     db.add(Message(id=new_id(), case_id=case.id, role="assistant", type="guide", payload=dict(GUIDE_CARD), created_at=now))

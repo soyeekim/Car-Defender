@@ -138,6 +138,53 @@ async def test_touched_case_is_always_on_top_even_on_a_coarse_clock(client, auth
         assert [i["id"] for i in items[:2]] == [a, b]
 
 
+async def test_touched_case_is_on_top_when_creations_straddle_a_clock_tick(client, auth_headers, monkeypatch):
+    """거친 시계를 결정적으로 재현한다: a는 tick1에, b는 tick2에 만들어지고, a를 tick2에 만진다.
+    "행별로만 1µs 더하는" 방식은 여기서 a·b의 updated_at이 같은 값이 되고, 두 번째 정렬 키인
+    id 내림차순에 져서 b가 위로 올라간다. 발급기는 프로세스 전체에서 단조 증가해야 한다."""
+    from datetime import UTC, datetime
+
+    from app.services import cases as case_service
+
+    tick1 = datetime(2026, 9, 3, 0, 0, 0, tzinfo=UTC)
+    tick2 = datetime(2026, 9, 3, 0, 0, 0, 15000, tzinfo=UTC)  # 15ms 뒤 = 윈도우 기본 해상도
+    seq = [tick1, tick2, tick2]
+    calls = {"n": 0}
+
+    def fake_now():
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i] if i < len(seq) else seq[-1]
+
+    monkeypatch.setattr(case_service, "_last_stamp", None)
+    monkeypatch.setattr(case_service, "now_utc", fake_now)
+
+    a = (await client.post("/cases", headers=auth_headers)).json()["id"]
+    b = (await client.post("/cases", headers=auth_headers)).json()["id"]
+    await client.patch(f"/cases/{a}", json={"title": "방금 고침"}, headers=auth_headers)
+
+    items = (await client.get("/cases", headers=auth_headers)).json()["items"]
+    assert [i["id"] for i in items] == [a, b]
+
+
+async def test_next_stamp_is_strictly_increasing_even_with_a_stopped_clock(monkeypatch):
+    """멈춘 시계(가장 거친 시계)에서도 같은 값을 두 번 주지 않고, 남이 이미 쓴 더 큰 값도 넘어선다."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.services import cases as case_service
+
+    frozen = datetime(2026, 9, 3, 0, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(case_service, "_last_stamp", None)
+    monkeypatch.setattr(case_service, "now_utc", lambda: frozen)
+
+    stamps = [case_service.next_stamp() for _ in range(200)]
+    assert stamps == sorted(stamps)
+    assert len(set(stamps)) == len(stamps)
+
+    ahead = stamps[-1] + timedelta(seconds=5)
+    assert case_service.next_stamp(ahead) > ahead
+
+
 async def test_touch_never_repeats_or_moves_backwards():
     """touch()는 같은 값을 두 번 쓰지 않는다 (단위 수준 확인)."""
     from app.clock import ensure_aware, now_utc
