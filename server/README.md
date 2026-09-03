@@ -138,3 +138,10 @@ AI 담당은 `app/agent/base.py`의 Protocol을 구현한 파이썬 클래스를
 그 클래스를 가리키면 된다(기본값은 데모용 `app.agent.mock:MockAgent`). 입출력 계약·필수 필드
 (`judge`는 `basis.precedents[].body_text`를 반드시 채워야 한다)·에러 처리 규칙은
 `docs/agent-interface.md`에 정리돼 있다.
+
+## 프론트엔드 연동
+
+`docs/frontend-guide.md` 에 세 환경(로컬 · Vercel 임시 도메인 · `fairway.click` 연결 후)의
+붙는 방법과 차이가 정리돼 있다. 로컬은 `cp .env.example .env && docker compose up -d` 한 번이면
+`http://localhost` 에 뜨고, `http://localhost/docs` 에서 Swagger 로 API 를 눌러 볼 수 있다.
+데모 계정은 `demo@fairway.click` / `demo1234` 다.
