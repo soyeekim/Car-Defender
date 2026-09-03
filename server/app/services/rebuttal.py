@@ -53,7 +53,8 @@ async def start_rebuttal(db: AsyncSession, case: Case) -> Job:
     if missing:
         raise ApiError("REBUTTAL_LOCKED", fields={"missing": ",".join(missing)})
     existing = await case_service.get_rebuttal(db, case.id)
-    if existing is not None and existing.status == "sent":
+    # 발송 중(sending)에도 막는다: 재생성 Job이 발송 중인 초안을 덮어쓰면 보낸 내용과 저장된 내용이 어긋난다.
+    if existing is not None and existing.status in ALREADY_SENT_STATUSES:
         raise ApiError("REBUTTAL_ALREADY_SENT")
     from app.jobs.rebuttal import run_rebuttal
     from app.jobs.runner import runner
@@ -161,8 +162,12 @@ async def apply_patch(db: AsyncSession, rebuttal: Rebuttal, patch: RebuttalPatch
         rebuttal.claim_number = (data["claim_number"] or "").strip() or None
     if "subject" in data and data["subject"] is not None:
         normalized = re.sub(r"[\r\n]+", " ", data["subject"]).strip()
-        rebuttal.subject = normalized[:200] or rebuttal.subject
-        rebuttal.subject_auto = False
+        if normalized:
+            rebuttal.subject = normalized[:200]
+            rebuttal.subject_auto = False
+        else:
+            # 제목을 비운 건 "자동 제목으로 되돌려 줘"라는 뜻이다. 아래에서 다시 만든다.
+            rebuttal.subject_auto = True
     if "body" in data and data["body"] is not None:
         rebuttal.body = data["body"]
     if "attachments" in data and data["attachments"] is not None:
@@ -331,9 +336,32 @@ async def send_logs(db: AsyncSession, case_id: str) -> dict:
     return {"items": items}
 
 
+async def _latest_send_log(db: AsyncSession, rebuttal_id: str) -> SendLog | None:
+    stmt = select(SendLog).where(SendLog.rebuttal_id == rebuttal_id).order_by(SendLog.sent_at.desc(), SendLog.id.desc())
+    return (await db.execute(stmt)).scalars().first()
+
+
 async def reset_stuck_sending(db: AsyncSession) -> int:
     """서버가 발송 도중 죽거나 재시작되면 sending에 갇힌 초안이 남을 수 있다.
-    기동 시 한 번 모두 draft로 되돌린다 (§8 문서화된 복구 규칙)."""
-    result = await db.execute(update(Rebuttal).where(Rebuttal.status == "sending").values(status="draft"))
+    기동 시 draft로 되돌리되, 되돌리는 건 "가장 최근 SendLog의 error가 in_progress"인 행뿐이다
+    (§8 문서화된 복구 규칙).
+
+    send()는 발송 직전에 error="in_progress"인 SendLog를 먼저 기록하고 status를 sending으로 선점한다.
+    그러니 진짜로 중간에 끊긴 행은 항상 in_progress 로그를 갖는다. 반대로 최신 로그가 sent거나
+    이미 결론난 실패인데도 status가 sending이면, 메일은 나갔는데 상태만 못 바꿨을 수 있다 —
+    그런 행을 draft로 풀면 중복 발송이 되므로 sending 그대로 두고 수동 확인 대상으로 남긴다."""
+    reverted = 0
+    stuck = (await db.execute(select(Rebuttal).where(Rebuttal.status == "sending"))).scalars().all()
+    for rebuttal in stuck:
+        latest = await _latest_send_log(db, rebuttal.id)
+        if latest is not None and latest.error == "in_progress":
+            rebuttal.status = "draft"
+            rebuttal.updated_at = now_utc()
+            reverted += 1
+        else:
+            logger.warning(
+                "sending에 갇힌 반박의견서를 자동 복구하지 않았어요 — 수동 확인이 필요해요: rebuttal=%s case=%s 최신 발송기록=%s",
+                rebuttal.id, rebuttal.case_id, latest.id if latest else None,
+            )
     await db.commit()
-    return result.rowcount or 0
+    return reverted

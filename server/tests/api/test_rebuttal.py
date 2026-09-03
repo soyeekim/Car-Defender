@@ -114,3 +114,42 @@ async def test_chat_create_rebuttal_action_locked_card(client, auth_headers, jud
     await settle()
     msgs = (await client.get(f"/cases/{judged_case}/messages", params={"limit": 50}, headers=auth_headers)).json()["items"]
     assert msgs[-1]["type"] == "rebuttal_locked" and msgs[-1]["payload"]["missing"] == ["report"]
+
+
+async def test_rebuttal_recreate_is_blocked_while_sending(client, auth_headers, reported_case, settle):
+    """발송 중(sending)에는 초안을 새로 만들 수도 없다 — 재생성이 sending 행을 덮어쓰면 안 된다."""
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import Rebuttal
+
+    await client.post(f"/cases/{reported_case}/rebuttal", headers=auth_headers)
+    await settle()
+
+    async with session_scope() as db:
+        rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == reported_case))).scalar_one()
+        rebuttal.status = "sending"
+        await db.commit()
+
+    res = await client.post(f"/cases/{reported_case}/rebuttal", headers=auth_headers)
+    assert res.status_code == 409 and res.json()["error"]["code"] == "REBUTTAL_ALREADY_SENT"
+
+
+async def test_rebuttal_empty_subject_restores_auto_subject(client, auth_headers, reported_case, settle):
+    """제목을 빈 값으로 비우면 '자동 제목으로 되돌려 줘'라는 뜻이다 (자동 제목을 끄는 게 아니다)."""
+    await client.post(f"/cases/{reported_case}/rebuttal", headers=auth_headers)
+    await settle()
+    url = f"/cases/{reported_case}/rebuttal"
+
+    await client.patch(url, json={"claimNumber": "2026-08-0000"}, headers=auth_headers)
+    res = await client.patch(url, json={"subject": "직접 쓴 제목"}, headers=auth_headers)
+    assert res.json()["subject"] == "직접 쓴 제목" and res.json()["subjectAuto"] is False
+
+    res = await client.patch(url, json={"subject": "   "}, headers=auth_headers)
+    assert res.status_code == 200
+    assert res.json()["subjectAuto"] is True
+    assert res.json()["subject"] == "과실비율 재검토 요청 (접수번호 2026-08-0000)"
+
+    # 자동 제목이 다시 켜졌으니 접수번호를 바꾸면 제목도 따라 바뀐다
+    res = await client.patch(url, json={"claimNumber": "X-1"}, headers=auth_headers)
+    assert res.json()["subject"] == "과실비율 재검토 요청 (접수번호 X-1)"

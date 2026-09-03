@@ -241,6 +241,29 @@ async def _send_bare(case_id: str, user_id: str, key: str) -> dict:
         return await rebuttal_service.send(db, case, rebuttal, user, key)
 
 
+async def _stick_in_sending(case_id: str, *, error: str | None = "in_progress", result: str = "failed") -> str:
+    """sending에 갇힌 행을 흉내낸다. send()는 발송 직전에 SendLog(error="in_progress")를 먼저 남기고
+    status를 sending으로 선점하므로, 복구 규칙이 보는 로그까지 같이 만들어 준다."""
+    from sqlalchemy import select
+
+    from app.clock import now_utc
+    from app.db import session_scope
+    from app.ids import new_id
+    from app.models import Rebuttal, SendLog
+
+    async with session_scope() as db:
+        rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
+        rebuttal.status = "sending"
+        log = SendLog(
+            id=new_id(), case_id=case_id, rebuttal_id=rebuttal.id, idempotency_key=str(uuid.uuid4()),
+            sent_at=now_utc(), from_email="hyun@example.com", recipient="kim@insu.co.kr", subject="테스트 제목",
+            attachment_names=[], result=result, provider_message_id=None, error=error,
+        )
+        db.add(log)
+        await db.commit()
+        return log.id
+
+
 async def test_send_concurrent_same_key_sends_exactly_once(app, monkeypatch):
     """같은 멱등키로 동시에 두 번 보내면: 메일은 한 번만 나가고, 이긴 쪽만 성공하며
     진 쪽은 MAIL_SEND_FAILED를 받는다(아직 승자가 끝나지 않았으므로). 이후 같은 키로
@@ -387,7 +410,48 @@ async def test_send_cancelled_task_reverts_to_draft_and_can_retry(app, monkeypat
 
 
 async def test_send_reset_stuck_sending_service_function(app):
-    """reset_stuck_sending()은 sending에 남아 있던 반박의견서를 모두 draft로 되돌린다."""
+    """reset_stuck_sending()은 '최신 발송기록이 in_progress'인 sending 행을 draft로 되돌린다."""
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import Rebuttal
+    from app.services import rebuttal as rebuttal_service
+
+    case_id, _user_id = await _bare_case_with_rebuttal()
+    await _stick_in_sending(case_id)
+
+    async with session_scope() as db:
+        n = await rebuttal_service.reset_stuck_sending(db)
+    assert n >= 1
+
+    async with session_scope() as db:
+        rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
+        assert rebuttal.status == "draft"
+
+
+async def test_send_reset_stuck_sending_leaves_finished_rows_alone(app):
+    """최신 발송기록이 in_progress가 아니면(예: 이미 sent) 메일은 나갔는데 상태만 못 바꾼 경우일 수 있다.
+    draft로 풀면 중복 발송이 되므로 sending 그대로 두고 수동 확인 대상으로 남긴다."""
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import Rebuttal
+    from app.services import rebuttal as rebuttal_service
+
+    case_id, _user_id = await _bare_case_with_rebuttal()
+    await _stick_in_sending(case_id, error=None, result="sent")
+
+    async with session_scope() as db:
+        n = await rebuttal_service.reset_stuck_sending(db)
+    assert n == 0
+
+    async with session_scope() as db:
+        rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
+        assert rebuttal.status == "sending"
+
+
+async def test_send_reset_stuck_sending_leaves_rows_without_any_send_log(app):
+    """발송기록이 아예 없는 sending 행도 send()가 만든 상태가 아니다 — 손대지 않는다."""
     from sqlalchemy import select
 
     from app.db import session_scope
@@ -401,12 +465,11 @@ async def test_send_reset_stuck_sending_service_function(app):
         await db.commit()
 
     async with session_scope() as db:
-        n = await rebuttal_service.reset_stuck_sending(db)
-    assert n >= 1
+        assert await rebuttal_service.reset_stuck_sending(db) == 0
 
     async with session_scope() as db:
         rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
-        assert rebuttal.status == "draft"
+        assert rebuttal.status == "sending"
 
 
 async def test_send_reset_stuck_sending_on_fresh_app_start(test_env):
@@ -423,10 +486,7 @@ async def test_send_reset_stuck_sending_on_fresh_app_start(test_env):
     await create_all()
 
     case_id, _user_id = await _bare_case_with_rebuttal()
-    async with session_scope() as db:
-        rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
-        rebuttal.status = "sending"
-        await db.commit()
+    await _stick_in_sending(case_id)
 
     from app.main import create_app
 
