@@ -149,3 +149,39 @@ async def test_perform_verdict_does_not_downgrade_sent_case(client, auth_headers
 
     detail = (await client.get(f"/cases/{case_id}", headers=auth_headers)).json()
     assert detail["status"] == "sent" and detail["verdict"]["version"] == 1
+
+
+async def test_analysis_timeout_restores_status_and_posts_error_card(client, auth_headers, case_id, upload, settle, monkeypatch):
+    """Job 타임아웃은 핸들러를 '취소'로 끊는다(CancelledError). 보통 예외가 아니어도
+    스피너를 걷고 오류 카드를 남겨야 한다."""
+    import asyncio
+
+    from app.agent.loader import get_agent
+    from app.config import get_settings
+    from app.errors import ERROR_CATALOG
+    from app.models import Job
+
+    async def never_returns(inp):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(get_agent()._impl, "analyze", never_returns)
+    async with session_scope() as db:
+        await add_message(db, case_id, "user", "text", {"text": "교차로에서 오토바이가 박았어요"}, publish=False)
+    monkeypatch.setattr(get_settings(), "job_timeout_seconds", 0.05)
+
+    assert (await upload()).json()["analysis"]["started"] is True
+    await settle()
+
+    detail = (await client.get(f"/cases/{case_id}", headers=auth_headers)).json()
+    assert detail["status"] == "intake"
+    assert detail["activeJob"] is None
+    assert detail["stages"]["analysis"] == {"state": "pending"}
+
+    msgs = (await client.get(f"/cases/{case_id}/messages", headers=auth_headers)).json()["items"]
+    assert msgs[-1]["type"] == "text" and msgs[-1]["role"] == "assistant"
+    assert msgs[-1]["payload"]["text"] == ERROR_CATALOG["INTERNAL_ERROR"].message
+
+    async with session_scope() as db:
+        job = (await db.execute(select(Job).where(Job.case_id == case_id))).scalars().one()
+        assert job.kind == "analysis" and job.status == "failed"
+        assert job.error["type"] == "TimeoutError"

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.base import AnalyzeInput
 from app.agent.loader import get_agent
 from app.clock import now_utc
+from app.db import session_scope
 from app.errors import ERROR_CATALOG, ApiError
 from app.jobs.runner import runner
 from app.models import Analysis, Case, Job, Message
@@ -31,15 +32,24 @@ async def start_analysis(db: AsyncSession, case: Case) -> Job:
 
 
 async def _restore_after_failure(db: AsyncSession, case_id: str, previous: str) -> None:
-    """분석이 실패했을 때 스피너를 걷고 오류 카드를 남긴다. 여기서 또 실패해도 원래 예외를 가리지 않는다."""
+    """분석이 실패했을 때 스피너를 걷고 오류 카드를 남긴다. 여기서 또 실패해도 원래 예외를 가리지 않는다.
+
+    타임아웃이면 핸들러가 '취소'된 채로 여기 들어온다. 넘겨받은 세션은 정리 중인 세션이라
+    그대로 쓰면 안 된다 — SQLite에서는 열린 트랜잭션이 다른 연결의 쓰기까지 막는다.
+    그래서 넘겨받은 세션은 먼저 닫고, 뒷정리는 새 세션에서 한다."""
     try:
         await db.rollback()
-        case = await db.get(Case, case_id)
-        if case is None:
-            return  # 사건이 지워졌으면 남길 곳도 없다
-        case_service.set_status(case, previous)
-        await db.commit()
-        await case_service.assistant_text(db, case_id, ERROR_CATALOG["INTERNAL_ERROR"].message)
+        await db.close()
+    except Exception:  # noqa: BLE001
+        log.exception("분석 실패 뒷정리 전 세션 정리에 실패했어요 (case %s)", case_id)
+    try:
+        async with session_scope() as fresh:
+            case = await fresh.get(Case, case_id)
+            if case is None:
+                return  # 사건이 지워졌으면 남길 곳도 없다
+            case_service.set_status(case, previous)
+            await fresh.commit()
+            await case_service.assistant_text(fresh, case_id, ERROR_CATALOG["INTERNAL_ERROR"].message)
     except Exception:  # noqa: BLE001
         log.exception("분석 실패 뒷정리에 실패했어요 (case %s)", case_id)
 
@@ -51,7 +61,9 @@ async def run_analysis(db: AsyncSession, case_id: str, job_id: str) -> None:
         previous = "intake"  # 분석 전 상태로 돌아간다
     try:
         await _run_analysis(db, case_id, job_id)
-    except Exception:
+    except BaseException:
+        # Exception이 아니라 BaseException이다: Job 타임아웃은 핸들러를 취소(CancelledError)로 끊는데,
+        # 그때도 "분석중" 스피너를 걷고 오류 카드를 남겨야 사용자가 멈춘 화면에 갇히지 않는다.
         await _restore_after_failure(db, case_id, previous)
         raise  # 러너가 Job을 failed 로 기록하게 둔다
 
