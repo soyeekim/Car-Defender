@@ -29,3 +29,6 @@ Thumbs.db
 # AWS 자격 증명 CSV 등 (실수로 커밋되는 것 방지)
 *credentials*.csv
 *.pem
+
+# subagent-driven-development 작업 원장 (로컬 전용)
+.superpowers/
