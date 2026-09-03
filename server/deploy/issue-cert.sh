@@ -7,7 +7,9 @@ set -euo pipefail
 
 EMAIL="${1:?사용법: ./deploy/issue-cert.sh <이메일> [도메인]}"
 DOMAIN="${2:-api.fairway.click}"
+# run에는 반드시 -T를 준다. TTY를 붙이면 SSH가 끊겼을 때 컨테이너가 출력에 막혀 멈춘다.
 CD="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
+RUN="$CD run --rm -T"
 LIVE="/etc/letsencrypt/live/${DOMAIN}"
 
 cd "$(dirname "$0")/.."
@@ -23,28 +25,40 @@ if [ -n "$MY_IP" ] && [ -n "$DNS_IP" ] && [ "$MY_IP" != "$DNS_IP" ]; then
     exit 1
 fi
 
-if $CD run --rm --entrypoint sh certbot -c "[ -f ${LIVE}/fullchain.pem ]" 2>/dev/null; then
-    echo "==> 이미 인증서가 있다. 다시 받으려면 아래를 먼저 실행한다."
-    echo "    $CD run --rm --entrypoint sh certbot -c 'rm -rf ${LIVE} /etc/letsencrypt/archive/${DOMAIN} /etc/letsencrypt/renewal/${DOMAIN}.conf'"
+echo "==> 기존 인증서 확인"
+# 자체 서명(발급자 == 대상)이면 이전 실행이 남긴 임시 인증서이므로 지우고 새로 받는다.
+ISSUER=$($RUN --entrypoint sh certbot -c \
+    "openssl x509 -in ${LIVE}/fullchain.pem -noout -issuer 2>/dev/null || true" 2>/dev/null | tr -d '\r')
+if echo "$ISSUER" | grep -qi "let's encrypt"; then
+    echo "    이미 정식 인증서가 있다. 다시 받으려면 아래를 먼저 실행한다."
+    echo "    $RUN --entrypoint sh certbot -c 'rm -rf ${LIVE} /etc/letsencrypt/archive/${DOMAIN} /etc/letsencrypt/renewal/${DOMAIN}.conf'"
     exit 0
+elif [ -n "$ISSUER" ]; then
+    echo "    임시(자체 서명) 인증서가 남아 있어 지운다."
+    $RUN --entrypoint sh certbot -c \
+        "rm -rf ${LIVE} /etc/letsencrypt/archive/${DOMAIN} /etc/letsencrypt/renewal/${DOMAIN}.conf" >/dev/null
+else
+    echo "    없음"
 fi
 
 echo "==> 임시 자체 서명 인증서 생성 (nginx를 띄우기 위한 발판)"
 # nginx는 인증서 파일이 없으면 시작하지 못하고, nginx가 없으면 인증 요청을 받을 수 없다.
-# 그래서 가짜 인증서로 일단 띄운 뒤 진짜로 교체한다.
-$CD run --rm --entrypoint sh certbot -c "
+$RUN --entrypoint sh certbot -c "
   mkdir -p ${LIVE} &&
   openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
-    -keyout ${LIVE}/privkey.pem -out ${LIVE}/fullchain.pem -subj '/CN=${DOMAIN}'
-"
+    -keyout ${LIVE}/privkey.pem -out ${LIVE}/fullchain.pem -subj '/CN=${DOMAIN}' 2>/dev/null
+" >/dev/null
 
 echo "==> nginx 기동"
 $CD up -d nginx
 sleep 3
 
 echo "==> 임시 인증서 제거 후 실제 발급"
-$CD run --rm --entrypoint sh certbot -c "rm -rf ${LIVE} /etc/letsencrypt/archive/${DOMAIN} /etc/letsencrypt/renewal/${DOMAIN}.conf"
-$CD run --rm certbot certonly \
+$RUN --entrypoint sh certbot -c \
+    "rm -rf ${LIVE} /etc/letsencrypt/archive/${DOMAIN} /etc/letsencrypt/renewal/${DOMAIN}.conf" >/dev/null
+# compose의 certbot 서비스에는 갱신 루프 entrypoint가 걸려 있다. 그대로 run하면
+# certonly 인자가 무시된 채 무한 루프가 돌므로 entrypoint를 반드시 되돌린다.
+$RUN --entrypoint certbot certbot certonly \
     --webroot -w /var/www/certbot \
     -d "$DOMAIN" \
     --email "$EMAIL" \
@@ -55,6 +69,10 @@ $CD up -d --force-recreate nginx
 sleep 3
 
 echo "==> 확인"
-curl -sI "https://${DOMAIN}/api/v1/health" | head -1 || true
+# 인스턴스 안에서 자기 탄력적 IP로 curl하면 AWS VPC 특성상 되돌아오지 않아 멈춘다.
+# 그래서 네트워크 대신 인증서 자체를 확인한다.
+$RUN --entrypoint sh certbot -c \
+    "openssl x509 -in ${LIVE}/fullchain.pem -noout -issuer -subject -dates"
 echo
 echo "발급 완료. 갱신은 certbot 컨테이너가 12시간마다 자동으로 시도한다."
+echo "바깥에서 https://${DOMAIN}/api/v1/health 로 확인한다."
