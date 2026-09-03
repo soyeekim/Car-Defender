@@ -4,11 +4,14 @@ API 계약 자체는 `20_API명세서_v2.md` 가 정본이다. 이 문서는 **�
 
 환경은 셋이다. 붙는 방법은 같고, **로그인 유지가 되느냐**가 다르다.
 
-| 환경 | API 주소 | 로그인 유지 |
-|---|---|---|
-| 로컬 | `http://localhost` | 된다 |
-| Vercel 임시 도메인 | `https://api.fairway.click` | **안 된다 (30분 뒤 풀림)** |
-| `fairway.click` 연결 후 | `https://api.fairway.click` | 된다 |
+| 환경 | 프론트 주소 | **BASE API URL** | 로그인 유지 |
+|---|---|---|---|
+| 로컬 | `http://localhost:5173` | `http://localhost/api/v1` | 된다 |
+| Vercel 임시 도메인 | `https://car-defender-tawny.vercel.app` | `https://api.fairway.click/api/v1` | **안 된다 (30분 뒤 풀림)** |
+| `fairway.click` 연결 후 | `https://fairway.click` | `https://api.fairway.click/api/v1` | 된다 |
+
+모든 엔드포인트는 이 BASE 뒤에 붙는다. 예: 로그인은 `{BASE}/auth/login`,
+사건 목록은 `{BASE}/cases`. `/api/v1` 을 빼먹으면 404가 난다.
 
 시연은 반드시 세 번째로 한다. 이유는 아래 "쿠키" 절에 있다.
 
@@ -174,12 +177,18 @@ const es = new EventSource(
 주소만 환경변수로 빼 두면 셋 다 커버된다.
 
 ```bash
-# .env.local
+# 1. 로컬 개발 (.env.local)
 VITE_API_BASE=http://localhost/api/v1
 
-# Vercel 환경변수
+# 2. Vercel 임시 도메인 (Vercel 환경변수)
+VITE_API_BASE=https://api.fairway.click/api/v1
+
+# 3. fairway.click 연결 후 (Vercel 환경변수 — 2번과 같다, 바꿀 것 없음)
 VITE_API_BASE=https://api.fairway.click/api/v1
 ```
+
+2 → 3 으로 넘어갈 때 API 쪽 설정은 그대로다. 프론트 도메인만 바뀌고,
+그 순간부터 refresh 쿠키가 전송되기 시작해 로그인 유지가 된다.
 
 ---
 
