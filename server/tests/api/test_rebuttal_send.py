@@ -1,6 +1,8 @@
 import asyncio
 import uuid
 
+import pytest
+
 from app.mail import get_mailer
 
 
@@ -240,9 +242,19 @@ async def _send_bare(case_id: str, user_id: str, key: str) -> dict:
 
 
 async def test_send_concurrent_same_key_sends_exactly_once(app, monkeypatch):
-    """같은 멱등키로 동시에 두 번 보내도, 메일은 한 번만 나가고 두 응답은 같은 로그이거나
-    (아직 진행 중일 때 진 쪽이 재조회하면) 진 쪽만 MAIL_SEND_FAILED를 받는다."""
+    """같은 멱등키로 동시에 두 번 보내면: 메일은 한 번만 나가고, 이긴 쪽만 성공하며
+    진 쪽은 MAIL_SEND_FAILED를 받는다(아직 승자가 끝나지 않았으므로). 이후 같은 키로
+    다시 보내면 메일을 다시 보내지 않고 승자의 결과를 그대로 돌려준다.
+
+    타이밍을 실제로 겹치게 확인하기 위해, 승자를 먼저 sending 상태(메일러에서 막힘)까지
+    보내 놓고 그 상태에서 진 쪽을 보낸다 — asyncio.gather로 둘 다 동시에 던지면 스케줄링에
+    따라 진 쪽의 재조회가 승자가 끝난 *뒤*에 일어날 수도 있어(둘 다 성공) 결과가 결정적이지
+    않다."""
+    from sqlalchemy import select
+
+    from app.db import session_scope
     from app.errors import ApiError
+    from app.models import Rebuttal
 
     case_id, user_id = await _bare_case_with_rebuttal()
     mailer = get_mailer()
@@ -256,32 +268,40 @@ async def test_send_concurrent_same_key_sends_exactly_once(app, monkeypatch):
     monkeypatch.setattr(mailer, "send", gated_send)
     key = str(uuid.uuid4())
 
-    t1 = asyncio.create_task(_send_bare(case_id, user_id, key))
-    t2 = asyncio.create_task(_send_bare(case_id, user_id, key))
-    for _ in range(50):
-        if t1.done() or t2.done():
-            break
+    winner_task = asyncio.create_task(_send_bare(case_id, user_id, key))
+    rebuttal = None
+    for _ in range(100):
+        async with session_scope() as db:
+            rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
+            if rebuttal.status == "sending":
+                break
         await asyncio.sleep(0.01)
-    gate.set()
-    r1, r2 = await asyncio.gather(t1, t2, return_exceptions=True)
+    assert rebuttal is not None and rebuttal.status == "sending" and not winner_task.done()
 
-    results = [r1, r2]
-    for r in results:
-        if isinstance(r, Exception) and not isinstance(r, ApiError):
-            raise r
+    with pytest.raises(ApiError) as ei:
+        await _send_bare(case_id, user_id, key)
+    assert ei.value.code == "MAIL_SEND_FAILED"
+
+    gate.set()
+    winner_result = await winner_task
+    assert winner_result["sendLogId"]
     assert len(mailer.sent) == 1
-    successes = [r for r in results if isinstance(r, dict)]
-    failures = [r for r in results if isinstance(r, ApiError)]
-    assert len(successes) + len(failures) == 2
-    if len(successes) == 2:
-        assert successes[0]["sendLogId"] == successes[1]["sendLogId"]
-    else:
-        assert len(successes) == 1 and len(failures) == 1
-        assert failures[0].code == "MAIL_SEND_FAILED"
+
+    # 다시 같은 키로 보내면: 메일 다시 안 나가고 승자의 결과를 그대로 돌려준다.
+    again = await _send_bare(case_id, user_id, key)
+    assert again["sendLogId"] == winner_result["sendLogId"]
+    assert len(mailer.sent) == 1
 
 
 async def test_send_concurrent_different_keys_only_one_wins(app):
+    """다른 멱등키로 동시에 보내면: 이긴 쪽만 메일을 보내고, 진 쪽의 플레이스홀더 로그는
+    지워져(§B) sends 목록에 유령 실패 행을 남기지 않는다. 진 쪽 키로 재시도해도
+    (플레이스홀더가 없으니 새로 검증을 거쳐) 여전히 REBUTTAL_ALREADY_SENT다."""
+    from sqlalchemy import select
+
+    from app.db import session_scope
     from app.errors import ApiError
+    from app.models import SendLog
 
     case_id, user_id = await _bare_case_with_rebuttal()
     key1, key2 = str(uuid.uuid4()), str(uuid.uuid4())
@@ -300,6 +320,15 @@ async def test_send_concurrent_different_keys_only_one_wins(app):
     assert failures[0].code == "REBUTTAL_ALREADY_SENT"
     assert len(get_mailer().sent) == 1
 
+    async with session_scope() as db:
+        rows = (await db.execute(select(SendLog).where(SendLog.case_id == case_id))).scalars().all()
+        assert len(rows) == 1 and rows[0].result == "sent"  # 진 쪽 플레이스홀더는 지워졌다
+
+    loser_key = key1 if isinstance(r1, ApiError) else key2
+    with pytest.raises(ApiError) as ei:
+        await _send_bare(case_id, user_id, loser_key)
+    assert ei.value.code == "REBUTTAL_ALREADY_SENT"
+
 
 async def test_send_idempotency_key_scoped_by_case(app):
     case1_id, user1_id = await _bare_case_with_rebuttal()
@@ -311,3 +340,100 @@ async def test_send_idempotency_key_scoped_by_case(app):
 
     assert r1["sendLogId"] != r2["sendLogId"]
     assert len(get_mailer().sent) == 2
+
+
+async def test_send_cancelled_task_reverts_to_draft_and_can_retry(app, monkeypatch):
+    """발송 태스크가 취소되면(프로세스 종료·타임아웃 등을 흉내) sending에 갇힌 초안이
+    draft로 되돌아가고, 새 키로 다시 보내면 정상적으로 발송된다."""
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import Rebuttal
+
+    case_id, user_id = await _bare_case_with_rebuttal()
+    mailer = get_mailer()
+    original_send = mailer.send
+    stuck = asyncio.Event()  # 절대 set되지 않는다 — 메일 발송이 영원히 멈춘 상황을 흉내낸다
+
+    async def hang(msg):
+        await stuck.wait()
+
+    monkeypatch.setattr(mailer, "send", hang)
+    key = str(uuid.uuid4())
+
+    task = asyncio.create_task(_send_bare(case_id, user_id, key))
+    rebuttal = None
+    for _ in range(100):
+        async with session_scope() as db:
+            rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
+            if rebuttal.status == "sending":
+                break
+        await asyncio.sleep(0.01)
+    assert rebuttal is not None and rebuttal.status == "sending" and not task.done()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    async with session_scope() as db:
+        rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
+        assert rebuttal.status == "draft"
+
+    monkeypatch.setattr(mailer, "send", original_send)
+    retry_key = str(uuid.uuid4())
+    result = await _send_bare(case_id, user_id, retry_key)
+    assert result["sendLogId"]
+    assert len(mailer.sent) == 1
+
+
+async def test_send_reset_stuck_sending_service_function(app):
+    """reset_stuck_sending()은 sending에 남아 있던 반박의견서를 모두 draft로 되돌린다."""
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import Rebuttal
+    from app.services import rebuttal as rebuttal_service
+
+    case_id, _user_id = await _bare_case_with_rebuttal()
+    async with session_scope() as db:
+        rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
+        rebuttal.status = "sending"
+        await db.commit()
+
+    async with session_scope() as db:
+        n = await rebuttal_service.reset_stuck_sending(db)
+    assert n >= 1
+
+    async with session_scope() as db:
+        rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
+        assert rebuttal.status == "draft"
+
+
+async def test_send_reset_stuck_sending_on_fresh_app_start(test_env):
+    """실제 서버 기동(lifespan)이 sending에 갇힌 행을 draft로 되돌리는지 끝까지 확인한다."""
+    from asgi_lifespan import LifespanManager
+    from sqlalchemy import select
+
+    from app.config import get_settings
+    from app.db import configure_database, create_all, session_scope
+    from app.models import Rebuttal
+
+    settings = get_settings()
+    configure_database(settings.database_url)
+    await create_all()
+
+    case_id, _user_id = await _bare_case_with_rebuttal()
+    async with session_scope() as db:
+        rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
+        rebuttal.status = "sending"
+        await db.commit()
+
+    from app.main import create_app
+
+    application = create_app()
+    async with LifespanManager(application):
+        pass  # 기동 중 reset_stuck_sending()이 실행된다
+
+    async with session_scope() as db:
+        rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == case_id))).scalar_one()
+        assert rebuttal.status == "draft"

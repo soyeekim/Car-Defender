@@ -25,6 +25,7 @@ from app.errors import register_error_handlers
 from app.jobs.runner import runner
 from app.middleware import CatchAllErrorMiddleware
 from app.services import actions, chat
+from app.services import rebuttal as rebuttal_service
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,10 @@ async def lifespan(app: FastAPI):
     if settings.app_env == "test":
         await db.create_all()
     await runner.cleanup_stale()
+    async with db.session_scope() as s:
+        reset_n = await rebuttal_service.reset_stuck_sending(s)
+        if reset_n:
+            log.info("발송 중 멈춰 있던 반박의견서 %d건을 draft로 되돌렸어요", reset_n)
     # 등록된 next_action 처리기를 남긴다: 문서 생성·반박 액션이 붙었는지 기동 로그로 확인한다.
     log.info("등록된 액션: %s", ", ".join(actions.registered()) or "(없음)")
     yield

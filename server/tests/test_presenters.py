@@ -25,6 +25,7 @@ def test_stages_table_from_spec_7_2():
     assert s("judged", report=True) == {"analysis": "done", "fault_ratio": "done", "report": "done", "rebuttal": "pending"}
     assert s("judged", report=True, reb="draft")["rebuttal"] == "in_progress"
     assert s("judged", "verdict", report=True, reb="draft") == {"analysis": "done", "fault_ratio": "done", "report": "done", "rebuttal": "in_progress"}
+    assert s("judged", report=True, reb="sending")["rebuttal"] == "in_progress"
     assert s("sent", report=True, reb="sent") == {"analysis": "done", "fault_ratio": "done", "report": "done", "rebuttal": "done"}
     assert s("closed", report=True, reb="sent")["rebuttal"] == "done"
 
@@ -62,6 +63,7 @@ def test_rebuttal_doc_labels():
     assert rebuttal_doc(True, False, None, None)["label"] == "잠김 · 경위서를 만들면 열려요"
     assert rebuttal_doc(True, True, None, None) == {"exists": False, "locked": False, "label": "이제 만들 수 있어요"}
     assert rebuttal_doc(True, True, Reb("draft"), None) == {"exists": True, "locked": False, "label": "작성 중"}
+    assert rebuttal_doc(True, True, Reb("sending"), None) == {"exists": True, "locked": False, "label": "작성 중"}
     sent_at = datetime(2026, 8, 25, 5, 32, tzinfo=UTC)
     assert rebuttal_doc(True, True, Reb("sent"), sent_at)["label"] == "발송 완료 · 08-25 14:32"
 

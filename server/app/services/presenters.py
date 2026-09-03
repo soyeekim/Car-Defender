@@ -32,7 +32,7 @@ def compute_stages(status: str, active_job_kind: str | None, has_report: bool, r
         report = "done" if has_report else "pending"
         if status in ("sent", "closed"):
             report, rebuttal = "done", "done"
-        elif rebuttal_status == "draft":
+        elif rebuttal_status in ("draft", "sending"):
             rebuttal = "in_progress"
     return {
         "analysis": {"state": analysis},

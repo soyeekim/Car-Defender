@@ -226,6 +226,7 @@ class Agent(Protocol):
 - **PDF** (`pdf/report_pdf.py`): fpdf2. Pretendard Regular/Bold 등록. 제목 `사건경위서`, 사건 제목·날짜, 4개 절, 하단 고지 문구. `page_count`는 생성 후 실제 페이지 수로 `reports.page_count`를 덮어쓴다. 파일명 `사건경위서_{사건제목}_{YYYYMMDD}.pdf`(제목의 파일 금지 문자는 `_`로).
 - **메일** (`mail/`): `Mailer.send(MailMessage) → provider_message_id`. `smtp`는 aiosmtplib(STARTTLS/SSL 환경 변수), `mock`은 로그 출력 + 가짜 ID. 헤더는 명세 §8.1 그대로(`From: "카-디펜더 ({email})" <MAIL_FROM>`, `Sender`·`Reply-To`=가입 이메일). 본문 말미 고정 문구 추가. 첨부 합계 25MB 초과면 영상 제외 + 안내 한 줄.
 - **발송 (G-4)**: `Idempotency-Key` 없으면 400 → 같은 키의 `send_logs` 있으면 그 결과 반환 → 검증(recipient·claimNumber·status) → 메일 동기 발송 → 성공: `rebuttals.status=sent` · `send_logs` INSERT · `sent` 카드 · `rebuttal.sent` · `case.updated`(sent). 실패: `send_logs`에 `result=failed` 기록 후 `MAIL_SEND_FAILED` 502. 실패 기록은 G-5 목록에서 `result: failed`로 보인다.
+- `Rebuttal.status`에 일시적 `sending` 상태가 있으며 클라이언트에는 `editable=false`로만 보인다; 서버 재시작 시 `draft`로 복구.
 
 ---
 

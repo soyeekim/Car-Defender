@@ -256,11 +256,17 @@ async def send(db: AsyncSession, case: Case, rebuttal: Rebuttal, user: User, ide
         update(Rebuttal).where(Rebuttal.id == rebuttal_id, Rebuttal.status == "draft").values(status="sending")
     )
     if claim.rowcount == 0:
-        await db.rollback()
+        # 진 쪽: 이 요청이 미리 기록해 둔 플레이스홀더 로그를 지운다 — 이 키는 아직 "쓰이지" 않았으니
+        # 재시도할 때 다시 검증(REBUTTAL_ALREADY_SENT)을 받게 하고, G-5 목록에 유령 실패 행을 남기지 않는다.
+        await db.delete(log)
+        await db.commit()
         raise ApiError("REBUTTAL_ALREADY_SENT")
     await db.commit()
     rebuttal.status = "sending"
 
+    # 여기서부터 실제 발송까지: 어떤 이유로 빠져나가도(예외는 물론, 태스크 취소·프로세스 종료 신호
+    # 같은 BaseException 포함) sending에 갇힌 초안을 draft로 되돌린다. 되돌리는 커밋마저 실패하면
+    # 그 예외를 바깥으로 새어 나가게 두지 않고 MAIL_SEND_FAILED로 응답한다.
     try:
         files: list[MailAttachment] = []
         storage = get_storage()
@@ -283,14 +289,24 @@ async def send(db: AsyncSession, case: Case, rebuttal: Rebuttal, user: User, ide
         log.provider_message_id = await get_mailer().send(msg)
         log.result = "sent"
         log.error = None
-    except Exception as e:
-        logger.exception("반박의견서 발송 실패: case=%s rebuttal=%s", case_id, rebuttal_id)
-        log.error = str(e)
+    except BaseException as e:
+        is_ordinary = isinstance(e, Exception)
+        if is_ordinary:
+            logger.exception("반박의견서 발송 실패: case=%s rebuttal=%s", case_id, rebuttal_id)
+        else:
+            logger.warning("반박의견서 발송이 중단됐어요(취소 등): case=%s rebuttal=%s (%r)", case_id, rebuttal_id, e)
+        log.error = str(e) if is_ordinary else f"{type(e).__name__}: {e}"
         log.result = "failed"
         rebuttal.status = "draft"
         rebuttal.updated_at = now_utc()
-        await db.commit()
-        raise ApiError("MAIL_SEND_FAILED") from e
+        try:
+            await db.commit()
+        except Exception:
+            logger.exception("발송 실패를 되돌리는 커밋도 실패했어요: case=%s rebuttal=%s", case_id, rebuttal_id)
+            raise ApiError("MAIL_SEND_FAILED") from e
+        if is_ordinary:
+            raise ApiError("MAIL_SEND_FAILED") from e
+        raise  # 취소 등 BaseException은 되돌린 뒤 그대로 다시 던진다
 
     rebuttal.status = "sent"
     rebuttal.updated_at = now
@@ -313,3 +329,11 @@ async def send_logs(db: AsyncSession, case_id: str) -> dict:
         "subject": s.subject, "attachmentCount": len(s.attachment_names), "attachmentNames": s.attachment_names, "result": s.result,
     } for s in (await db.execute(stmt)).scalars().all()]
     return {"items": items}
+
+
+async def reset_stuck_sending(db: AsyncSession) -> int:
+    """서버가 발송 도중 죽거나 재시작되면 sending에 갇힌 초안이 남을 수 있다.
+    기동 시 한 번 모두 draft로 되돌린다 (§8 문서화된 복구 규칙)."""
+    result = await db.execute(update(Rebuttal).where(Rebuttal.status == "sending").values(status="draft"))
+    await db.commit()
+    return result.rowcount or 0
