@@ -8,6 +8,10 @@ from app.clock import kst_yyyymmdd
 
 FONT_DIR = Path(__file__).parent / "fonts"
 FONT = "NanumGothic"
+# 문서마다 다시 만들 이유가 없는 "경로 문자열"만 캐시한다. fpdf2가 읽어 들인 폰트 객체는
+# 문서에 묶여 있어(서브셋·글리프 인덱스) 문서 간에 돌려 쓰면 안 되므로 캐시하지 않는다.
+_FONT_REGULAR = str(FONT_DIR / "NanumGothic-Regular.ttf")
+_FONT_BOLD = str(FONT_DIR / "NanumGothic-Bold.ttf")
 _BAD = re.compile(r'[\\/:*?"<>|]')
 
 
@@ -22,8 +26,8 @@ def report_pdf_filename(case_title: str, created_at: datetime) -> str:
 class _Doc(FPDF):
     def __init__(self) -> None:
         super().__init__(format="A4")
-        self.add_font(FONT, "", str(FONT_DIR / "NanumGothic-Regular.ttf"))
-        self.add_font(FONT, "B", str(FONT_DIR / "NanumGothic-Bold.ttf"))
+        self.add_font(FONT, "", _FONT_REGULAR)
+        self.add_font(FONT, "B", _FONT_BOLD)
         self.set_auto_page_break(auto=True, margin=20)
         self.set_margins(20, 20, 20)
 

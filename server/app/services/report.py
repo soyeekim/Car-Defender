@@ -1,3 +1,5 @@
+import asyncio
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -106,7 +108,9 @@ async def ensure_pdf(db: AsyncSession, case: Case, report: Report) -> tuple[Repo
     existing = await pdf_for(db, report_id)
     if existing is not None:
         return existing, False
-    data, pages = render_report_pdf(
+    # fpdf2 렌더링은 순수 CPU 작업이다. 이벤트 루프에서 돌리면 그동안 다른 요청과 SSE가 전부 멈춘다.
+    data, pages = await asyncio.to_thread(
+        render_report_pdf,
         case_title=case.title, date_label=kst_date_label(report.created_at),
         version_label=ordinal_label(report.version), sections=report.sections, disclaimer=DISCLAIMER,
     )

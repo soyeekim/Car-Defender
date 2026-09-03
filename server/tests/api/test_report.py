@@ -159,3 +159,25 @@ async def test_chat_create_report_action(client, auth_headers, judged_case, sett
     await settle()
     detail = (await client.get(f"/cases/{judged_case}", headers=auth_headers)).json()
     assert detail["documents"]["report"]["exists"] is True
+
+
+async def test_pdf_rendering_runs_off_the_event_loop(client, auth_headers, judged_case, settle, monkeypatch):
+    """fpdf2 렌더링은 순수 CPU 작업이다. 이벤트 루프에서 돌리면 그동안 다른 요청과 SSE가 전부 멈춘다."""
+    import threading
+
+    from app.services import report as report_service
+
+    seen: dict[str, bool] = {}
+    original = report_service.render_report_pdf
+
+    def spy(**kwargs):
+        seen["off_main_thread"] = threading.current_thread() is not threading.main_thread()
+        return original(**kwargs)
+
+    monkeypatch.setattr(report_service, "render_report_pdf", spy)
+
+    await client.post(f"/cases/{judged_case}/report", headers=auth_headers)
+    await settle()
+    res = await client.post(f"/cases/{judged_case}/report/versions/1/pdf", headers=auth_headers)
+    assert res.status_code == 201, res.text
+    assert seen["off_main_thread"] is True
