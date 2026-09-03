@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+logs/*.json
+logs/**/*.json
+.venv/
+venv/
+.pytest_cache/
+ai/data/
+ai/.env
+ai/logs/
+ai/.env.example
