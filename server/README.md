@@ -4,20 +4,23 @@ FastAPI · PostgreSQL · SSE. API 계약은 `20_API명세서_v2.md`, 구조는 `
 
 ## 로컬 실행
 
+`.env.example`의 기본값이 SQLite(`sqlite+aiosqlite:///./data/dev.db`)라 아래를 그대로
+복사해 붙이면 Postgres 없이 돈다.
+
 ```bash
 py -3.11 -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"
-cp .env.example .env            # 값 수정
-docker compose up -d db         # Postgres만
+cp .env.example .env               # 기본값 그대로 두면 SQLite로 돈다
+mkdir -p data                      # SQLite 파일과 업로드가 여기 쌓인다
 .venv/Scripts/python -m alembic upgrade head
 .venv/Scripts/python -m app.seed   # 데모 데이터: demo@cardefender.kr / demo1234 (종결 사건 1건)
 .venv/Scripts/python -m uvicorn app.main:app --reload
 ```
 
-`db` 서비스는 호스트에 5432 포트를 열지 않는다(이유는 아래 배포 섹션 참고).
-호스트에서 바로 접속하려면 `DATABASE_URL=sqlite+aiosqlite:///./data/dev.db`로 두어
-Postgres 없이 돌리거나, `docker-compose.yml`의 `db` 서비스에 임시로
-`ports: ["127.0.0.1:5432:5432"]`를 추가한다.
+로컬에서 Postgres로 돌려 보려면 `docker compose up -d db`로 DB만 띄우고 `.env`의
+`DATABASE_URL`을 Postgres URL로 바꾼다. 다만 `db` 서비스는 호스트에 5432 포트를 열지
+않으므로(이유는 아래 배포 섹션 참고) 호스트에서 붙으려면 `docker-compose.yml`의 `db`
+서비스에 임시로 `ports: ["127.0.0.1:5432:5432"]`를 추가해야 한다.
 
 ## 테스트
 
@@ -34,9 +37,16 @@ Postgres 없이 돌리거나, `docker-compose.yml`의 `db` 서비스에 임시�
 ## 배포 (EC2 한 대)
 
 ```bash
+cp .env.example .env   # JWT_SECRET을 긴 랜덤 값으로, APP_ENV=prod 로 바꾼다
 docker compose up -d --build
 curl localhost/api/v1/health
 ```
+
+`app` 서비스는 `env_file: .env`로 이 파일을 읽으므로 `.env`가 반드시 있어야 한다.
+`DATABASE_URL`은 compose의 `app` 서비스가
+`postgresql+asyncpg://cardefender:cardefender@db:5432/cardefender`로 덮어쓰기 때문에
+`.env`의 SQLite 기본값은 무시된다. compose 밖에서 앱을 띄운다면 `.env`의
+`DATABASE_URL`을 그 Postgres URL로 직접 바꿔야 한다.
 
 `docker-compose.yml`의 `app`, `db` 서비스는 호스트에 포트를 열지 않는다. nginx가
 유일한 진입점이어야 레이트리밋(앱 프로세스 메모리 기준)과 `X-Forwarded-For` 기반
@@ -53,6 +63,18 @@ curl localhost/api/v1/health
 ## 환경 변수
 
 `.env.example` 참고. `AGENT_IMPL`은 `패키지.모듈:클래스` 형식으로 AI 담당 구현체를 가리킨다. 기본값은 `app.agent.mock:MockAgent`.
+
+## 스토리지
+
+`STORAGE_BACKEND=local`(기본값)을 쓴다. S3 백엔드는 인터페이스만 구현돼 있고 실제 버킷에
+대고 검증한 적이 없다 — 운영에 쓰기 전에 반드시 확인이 필요하다.
+
+## 메일 첨부 메모리
+
+발송은 첨부 파일을 메모리로 전부 읽어 MIME으로 base64 인코딩한다. 첨부 합계 상한이
+25MB이므로 발송 한 건이 순간적으로 약 60~100MB를 쓴다(원본 + 인코딩본 + 메시지 사본).
+`uvicorn --workers 1` 한 프로세스에서 동시 발송이 겹치면 그만큼 곱해지니, 인스턴스
+메모리를 잡을 때 감안한다.
 
 ## AI 담당 연동
 

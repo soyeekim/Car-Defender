@@ -92,10 +92,16 @@ server/
 | `reports` | id, case_id FK, version, sections JSON, caveat, page_count, revision_request, created_at | INSERT 누적 |
 | `report_pdfs` | id, report_id FK(unique), storage_key, filename, size_bytes, created_at | 버전당 1개, 재생성 없음 |
 | `rebuttals` | id, case_id FK(unique), recipient, claim_number, subject, subject_auto, body, attachments JSON, status, created_at, updated_at | `sent`면 잠금 |
-| `send_logs` | id, case_id, rebuttal_id, idempotency_key(unique), sent_at, from_email, recipient, subject, attachment_names JSON, result, provider_message_id, error | **FK 없음**. 멱등키는 여기 |
+| `send_logs` | id, case_id, rebuttal_id, idempotency_key, sent_at, from_email, recipient, subject, attachment_names JSON, result, provider_message_id, error | **FK 없음**. 멱등키는 여기 — 유니크는 `(case_id, idempotency_key)`(사건 단위 범위) |
 | `jobs` | id, case_id FK, kind, status, error JSON, started_at, ended_at | 명세의 `idempotencyKey`는 발송이 동기라 `send_logs`로 이동 |
 
-**명세와 다른 점 두 가지**(응답 계약은 동일): `Case.stages`를 계산 필드로 두는 것, 멱등키를 `send_logs`에 두는 것. 둘 다 저장하면 어긋날 수 있는 값을 저장하지 않기 위해서다.
+**명세와 다른 점 세 가지.**
+
+1. `Case.stages`를 저장하지 않고 계산 필드로 둔다.
+2. 멱등키를 `send_logs`에 두고, 유니크 범위를 `(case_id, idempotency_key)`로 한다(사건 단위).
+
+   1·2는 응답 계약이 명세와 동일하다 — 저장하면 어긋날 수 있는 값을 저장하지 않기 위한 선택이다.
+3. G-2 응답의 status에 일시적 값 `"sending"`이 노출될 수 있다(`editable=false`, `canSend=false`); 클라이언트는 draft로 취급한다. 이건 응답 계약에 값 하나가 더 보이는 차이다(§8).
 
 **Case 삭제.** ORM cascade로 messages · videos · analyses · verdicts · reports(+report_pdfs) · rebuttals · jobs 삭제. 서비스 계층에서 스토리지 객체(영상·PDF)도 함께 지운다. `send_logs`는 남긴다.
 
@@ -227,7 +233,8 @@ class Agent(Protocol):
 - **PDF** (`pdf/report_pdf.py`): fpdf2. NanumGothic(OFL) Regular/Bold 등록. 제목 `사건경위서`, 사건 제목·날짜, 4개 절, 하단 고지 문구. `page_count`는 생성 후 실제 페이지 수로 `reports.page_count`를 덮어쓴다. 파일명 `사건경위서_{사건제목}_{YYYYMMDD}.pdf`(제목의 파일 금지 문자는 `_`로).
 - **메일** (`mail/`): `Mailer.send(MailMessage) → provider_message_id`. `smtp`는 aiosmtplib(STARTTLS/SSL 환경 변수), `mock`은 로그 출력 + 가짜 ID. 헤더는 명세 §8.1 그대로(`From: "카-디펜더 ({email})" <MAIL_FROM>`, `Sender`·`Reply-To`=가입 이메일). 본문 말미 고정 문구 추가. 첨부 합계 25MB 초과면 영상 제외 + 안내 한 줄.
 - **발송 (G-4)**: `Idempotency-Key` 없으면 400 → 같은 키의 `send_logs` 있으면 그 결과 반환 → 검증(recipient·claimNumber·status) → 메일 동기 발송 → 성공: `rebuttals.status=sent` · `send_logs` INSERT · `sent` 카드 · `rebuttal.sent` · `case.updated`(sent). 실패: `send_logs`에 `result=failed` 기록 후 `MAIL_SEND_FAILED` 502. 실패 기록은 G-5 목록에서 `result: failed`로 보인다.
-- `Rebuttal.status`에 일시적 `sending` 상태가 있으며 클라이언트에는 `editable=false`로만 보인다; 서버 재시작 시 `draft`로 복구.
+- **`sending` 노출**: `Rebuttal.status`에는 일시적 값 `sending`이 있다. G-2 응답의 status에 일시적 값 `"sending"`이 노출될 수 있다(`editable=false`, `canSend=false`); 클라이언트는 draft로 취급. 이 상태에서는 수정(G-3)·재생성(G-1)·발송(G-4) 모두 `REBUTTAL_ALREADY_SENT`로 막힌다.
+- **재시작 복구**: 기동 시 `reset_stuck_sending`이 `sending`에 갇힌 행을 `draft`로 되돌린다 — 단 **가장 최근 `SendLog`의 `error`가 `in_progress`인 행만** 되돌린다. `send()`가 발송 직전에 `error="in_progress"` 로그를 먼저 남기고 status를 선점하므로, 진짜로 중간에 끊긴 행은 항상 그 로그를 갖는다. 최신 로그가 `sent`거나 이미 결론난 실패인데 status가 `sending`이면 메일은 나갔는데 상태만 못 바꾼 경우일 수 있어(되돌리면 중복 발송) `sending` 그대로 두고 경고 로그로 수동 확인 대상에 남긴다.
 
 ---
 
