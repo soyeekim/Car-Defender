@@ -289,7 +289,7 @@ async def send(db: AsyncSession, case: Case, rebuttal: Rebuttal, user: User, ide
         msg = MailMessage(
             to=rebuttal.recipient, subject=rebuttal.subject,
             body_text=rebuttal_body(rebuttal.body, user.email, video_dropped),
-            reply_to=user.email, sender_email=user.email, display_name=f"카-디펜더 ({user.email})", attachments=files,
+            reply_to=user.email, sender_email=user.email, display_name=f"Fairway ({user.email})", attachments=files,
         )
         log.provider_message_id = await get_mailer().send(msg)
         log.result = "sent"

@@ -131,7 +131,7 @@ def access_expires_in() -> int:
     return get_settings().access_token_minutes * 60
 
 
-_DUMMY_HASH = hash_password("cardefender-dummy-password-0")
+_DUMMY_HASH = hash_password("fairway-dummy-password-0")
 
 
 async def login(db: AsyncSession, email: str, password: str) -> User:
@@ -215,12 +215,12 @@ async def request_password_reset(db: AsyncSession, email: str) -> None:
     await db.commit()
     link = f"{get_settings().front_base_url.rstrip('/')}/reset?token={raw}"
     body = (
-        "카-디펜더 비밀번호 재설정 링크예요. 30분 안에 아래 주소를 열어 새 비밀번호를 정해 주세요.\n\n"
+        "Fairway 비밀번호 재설정 링크예요. 30분 안에 아래 주소를 열어 새 비밀번호를 정해 주세요.\n\n"
         f"{link}\n\n"
         "본인이 요청하지 않았다면 이 메일은 무시해도 돼요."
     )
     try:
-        await get_mailer().send(MailMessage(to=user.email, subject="[카-디펜더] 비밀번호 재설정", body_text=body))
+        await get_mailer().send(MailMessage(to=user.email, subject="[Fairway] 비밀번호 재설정", body_text=body))
     except MailSendError:
         log.exception("password reset mail send failed for user_id=%s", user.id)
 

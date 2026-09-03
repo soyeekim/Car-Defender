@@ -20,7 +20,7 @@ async def test_mock_mailer_records_messages(test_env):
 
 
 def _smtp_settings() -> Settings:
-    return Settings(mail_from="no-reply@cardefender.kr", smtp_host="smtp.example.com")
+    return Settings(mail_from="no-reply@fairway.click", smtp_host="smtp.example.com")
 
 
 async def test_smtp_mailer_headers(monkeypatch):
@@ -37,7 +37,7 @@ async def test_smtp_mailer_headers(monkeypatch):
         body_text="본문입니다.",
         reply_to="hyun@example.com",
         sender_email="hyun@example.com",
-        display_name="카-디펜더 (hyun@example.com)",
+        display_name="Fairway (hyun@example.com)",
         attachments=[
             MailAttachment(filename="사건경위서_20260822.pdf", content=b"%PDF-1.4", mime_type="application/pdf"),
             MailAttachment(filename="blackbox_0822.mp4", content=b"\x00\x00", mime_type="video/mp4"),
@@ -47,8 +47,8 @@ async def test_smtp_mailer_headers(monkeypatch):
     assert message_id
 
     parsed = email.message_from_bytes(captured["msg"].as_bytes(), policy=email.policy.default)
-    assert parsed["From"].addresses[0].display_name == "카-디펜더 (hyun@example.com)"
-    assert parsed["From"].addresses[0].addr_spec == "no-reply@cardefender.kr"
+    assert parsed["From"].addresses[0].display_name == "Fairway (hyun@example.com)"
+    assert parsed["From"].addresses[0].addr_spec == "no-reply@fairway.click"
     assert parsed["Sender"] == "hyun@example.com"
     assert parsed["Reply-To"] == "hyun@example.com"
     assert parsed["Subject"] == "과실비율 재검토 요청 (접수번호 2026-08-0000)"

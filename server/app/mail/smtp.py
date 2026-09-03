@@ -17,7 +17,7 @@ class SmtpMailer:
 
     async def send(self, msg: MailMessage) -> str:
         em = EmailMessage()
-        display = msg.display_name or "카-디펜더"
+        display = msg.display_name or "Fairway"
         em["From"] = Address(display_name=display, addr_spec=self.s.mail_from)
         em["To"] = msg.to
         em["Subject"] = msg.subject

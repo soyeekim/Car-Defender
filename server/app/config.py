@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     smtp_user: str | None = None
     smtp_password: str | None = None
     smtp_starttls: bool = True
-    mail_from: str = "no-reply@cardefender.kr"
+    mail_from: str = "no-reply@fairway.click"
     ffprobe_bin: str = "ffprobe"
 
     @property

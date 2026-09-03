@@ -2,15 +2,15 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: cardefender
-      POSTGRES_PASSWORD: cardefender
-      POSTGRES_DB: cardefender
+      POSTGRES_USER: fairway
+      POSTGRES_PASSWORD: fairway
+      POSTGRES_DB: fairway
     volumes:
       - pgdata:/var/lib/postgresql/data
     # nginx가 유일한 진입점이다. 로컬에서 psql로 직접 붙어야 하면
     # "127.0.0.1:5432:5432" 처럼 루프백에만 바인딩해서 연다.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cardefender"]
+      test: ["CMD-SHELL", "pg_isready -U fairway"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -18,11 +18,11 @@ services:
   app:
     # 로컬에서는 build 결과에 이 태그가 붙고, EC2에서는 .env의 APP_IMAGE가 가리키는
     # 레지스트리 이미지를 받아 쓴다 (docker compose pull && up -d --no-build).
-    image: ${APP_IMAGE:-cardefender-app:local}
+    image: ${APP_IMAGE:-fairway-app:local}
     build: .
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://cardefender:cardefender@db:5432/cardefender
+      DATABASE_URL: postgresql+asyncpg://fairway:fairway@db:5432/fairway
       STORAGE_LOCAL_DIR: /data
     volumes:
       - ./data:/data

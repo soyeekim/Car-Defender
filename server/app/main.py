@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title="카-디펜더 API", version=settings.app_version, lifespan=lifespan)
+    app = FastAPI(title="Fairway API", version=settings.app_version, lifespan=lifespan)
     register_error_handlers(app)
     app.add_middleware(CatchAllErrorMiddleware)
     app.add_middleware(

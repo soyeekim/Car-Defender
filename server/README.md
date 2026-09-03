@@ -1,4 +1,4 @@
-# 카-디펜더 백엔드
+# Fairway 백엔드
 
 FastAPI · PostgreSQL · SSE. API 계약은 `20_API명세서_v2.md`, 구조는 `docs/superpowers/specs/2026-09-03-backend-design.md`.
 
@@ -13,7 +13,7 @@ py -3.11 -m venv .venv
 cp .env.example .env               # 기본값 그대로 두면 SQLite로 돈다
 mkdir -p data                      # SQLite 파일과 업로드가 여기 쌓인다
 .venv/Scripts/python -m alembic upgrade head
-.venv/Scripts/python -m app.seed   # 데모 데이터: demo@cardefender.kr / demo1234 (종결 사건 1건)
+.venv/Scripts/python -m app.seed   # 데모 데이터: demo@fairway.click / demo1234 (종결 사건 1건)
 .venv/Scripts/python -m uvicorn app.main:app --reload
 ```
 
@@ -53,16 +53,16 @@ t3.micro처럼 메모리 1GB인 인스턴스에서는 빌드가 무겁다(`pip i
 
 ```bash
 # 개발 PC
-docker build -t <계정>/cardefender-app:v1 .
-docker push <계정>/cardefender-app:v1
+docker build -t <계정>/fairway-app:v1 .
+docker push <계정>/fairway-app:v1
 
-# EC2 (.env에 APP_IMAGE=<계정>/cardefender-app:v1 를 추가한 뒤)
+# EC2 (.env에 APP_IMAGE=<계정>/fairway-app:v1 를 추가한 뒤)
 docker login                      # 비공개 저장소일 때만
 docker compose pull
 docker compose up -d --no-build
 ```
 
-`docker-compose.yml`의 `app.image`는 `${APP_IMAGE:-cardefender-app:local}`이다.
+`docker-compose.yml`의 `app.image`는 `${APP_IMAGE:-fairway-app:local}`이다.
 `.env`에 `APP_IMAGE`가 없으면 로컬 빌드 태그를 쓰고, 있으면 그 이미지를 받아 쓴다.
 
 `Dockerfile`은 의존성 설치를 코드 복사보다 먼저 한다. 그래서 코드만 고친 배포는
@@ -72,7 +72,7 @@ docker compose up -d --no-build
 
 `app` 서비스는 `env_file: .env`로 이 파일을 읽으므로 `.env`가 반드시 있어야 한다.
 `DATABASE_URL`은 compose의 `app` 서비스가
-`postgresql+asyncpg://cardefender:cardefender@db:5432/cardefender`로 덮어쓰기 때문에
+`postgresql+asyncpg://fairway:fairway@db:5432/fairway`로 덮어쓰기 때문에
 `.env`의 SQLite 기본값은 무시된다. compose 밖에서 앱을 띄운다면 `.env`의
 `DATABASE_URL`을 그 Postgres URL로 직접 바꿔야 한다.
 

@@ -6,7 +6,7 @@ NEED_DESCRIPTION_TEXT = "영상 잘 받았어요. 사고 상황을 한두 문장
 UPLOAD_CTA = {"type": "upload_video", "label": "영상 올리기"}
 
 GUIDE_CARD = {
-    "text": "안녕하세요, 카-디펜더예요. 사고 상황을 말로 설명하고, 블랙박스 영상을 올려 주세요. 둘이 모이면 분석이 자동으로 시작돼요.",
+    "text": "안녕하세요, Fairway예요. 사고 상황을 말로 설명하고, 블랙박스 영상을 올려 주세요. 둘이 모이면 분석이 자동으로 시작돼요.",
     "notice": VIDEO_NOTICE,
     "limitsLabel": LIMITS_LABEL,
 }

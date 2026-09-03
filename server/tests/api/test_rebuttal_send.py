@@ -42,11 +42,11 @@ async def test_send_success_flow(client, auth_headers, reported_case, settle, ss
 
     sent = get_mailer().sent[-1]
     assert sent.to == "kim@insu.co.kr" and sent.reply_to == "hyun@example.com" and sent.sender_email == "hyun@example.com"
-    assert sent.display_name == "카-디펜더 (hyun@example.com)"
+    assert sent.display_name == "Fairway (hyun@example.com)"
     assert sent.subject == "과실비율 재검토 요청 (접수번호 2026-08-0000)"
     assert [a.filename for a in sent.attachments][0].startswith("사건경위서_") and sent.attachments[1].filename == "blackbox_0822.mp4"
     assert sent.attachments[0].content[:4] == b"%PDF"
-    assert "이 메일은 카-디펜더(cardefender.kr)를 통해 hyun@example.com 님이 보냈습니다." in sent.body_text
+    assert "이 메일은 Fairway(fairway.click)를 통해 hyun@example.com 님이 보냈습니다." in sent.body_text
 
     frames = await tap.take(3)
     assert '"type": "sent"' in frames[0] and '"attachmentCount": 2' in frames[0] and '"nextSteps"' in frames[0]

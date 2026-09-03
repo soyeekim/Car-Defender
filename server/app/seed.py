@@ -11,7 +11,7 @@ from app.ids import new_id
 from app.models import Case, Message, Rebuttal, Report, User, Verdict
 from app.security import hash_password
 
-DEMO_EMAIL = "demo@cardefender.kr"
+DEMO_EMAIL = "demo@fairway.click"
 DEMO_PASSWORD = "demo1234"
 
 
