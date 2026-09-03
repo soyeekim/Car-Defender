@@ -1,4 +1,8 @@
-from sqlalchemy import select
+import logging
+import re
+
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clock import now_utc, to_kst_iso
@@ -14,7 +18,7 @@ from app.content.texts import (
 )
 from app.errors import ApiError
 from app.ids import new_id
-from app.mail import MailAttachment, MailMessage, MailSendError, get_mailer
+from app.mail import MailAttachment, MailMessage, get_mailer
 from app.mail.templates import rebuttal_body
 from app.models import Case, Job, Message, Rebuttal, SendLog, User, Video
 from app.schemas.rebuttal import RebuttalPatch
@@ -25,7 +29,10 @@ from app.services.report import ensure_pdf, pdf_for, report_by_version
 from app.sse.hub import hub
 from app.storage import get_storage
 
+logger = logging.getLogger(__name__)
+
 MAX_ATTACH_BYTES = 25 * 1024 * 1024
+ALREADY_SENT_STATUSES = ("sent", "sending")
 
 
 def auto_subject(claim_number: str | None) -> str:
@@ -142,7 +149,7 @@ async def draft_card(db: AsyncSession, case_id: str) -> Message | None:
 
 
 async def apply_patch(db: AsyncSession, rebuttal: Rebuttal, patch: RebuttalPatch) -> Rebuttal:
-    if rebuttal.status == "sent":
+    if rebuttal.status in ALREADY_SENT_STATUSES:
         raise ApiError("REBUTTAL_ALREADY_SENT")
     data = patch.model_dump(exclude_unset=True)
     if "recipient" in data:
@@ -153,7 +160,8 @@ async def apply_patch(db: AsyncSession, rebuttal: Rebuttal, patch: RebuttalPatch
     if "claim_number" in data:
         rebuttal.claim_number = (data["claim_number"] or "").strip() or None
     if "subject" in data and data["subject"] is not None:
-        rebuttal.subject = data["subject"].strip()[:200] or rebuttal.subject
+        normalized = re.sub(r"[\r\n]+", " ", data["subject"]).strip()
+        rebuttal.subject = normalized[:200] or rebuttal.subject
         rebuttal.subject_auto = False
     if "body" in data and data["body"] is not None:
         rebuttal.body = data["body"]
@@ -178,75 +186,123 @@ def _send_result(log: SendLog, attachment_count: int) -> dict:
     return {"sendLogId": log.id, "sentAt": to_kst_iso(log.sent_at), "fromEmail": log.from_email, "recipient": log.recipient, "attachmentCount": attachment_count}
 
 
+async def _prior_send_log(db: AsyncSession, case_id: str, idempotency_key: str) -> SendLog | None:
+    stmt = select(SendLog).where(SendLog.idempotency_key == idempotency_key, SendLog.case_id == case_id)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def send(db: AsyncSession, case: Case, rebuttal: Rebuttal, user: User, idempotency_key: str | None) -> dict:
     if not idempotency_key:
         raise ApiError("IDEMPOTENCY_KEY_REQUIRED")
-    prior = (await db.execute(select(SendLog).where(SendLog.idempotency_key == idempotency_key))).scalar_one_or_none()
+    # rollback은 세션의 객체를 모두 expire시킨다. rollback 이후 case.id/rebuttal.id에
+    # 접근하면 동기 지연로딩이 걸려 MissingGreenlet이 나므로, id는 미리 뽑아 둔다.
+    case_id = case.id
+    rebuttal_id = rebuttal.id
+    prior = await _prior_send_log(db, case_id, idempotency_key)
     if prior is not None:
         if prior.result == "sent":
             return _send_result(prior, len(prior.attachment_names))
         raise ApiError("MAIL_SEND_FAILED")
-    if rebuttal.status == "sent":
+    if rebuttal.status in ALREADY_SENT_STATUSES:
         raise ApiError("REBUTTAL_ALREADY_SENT")
     if not is_email(rebuttal.recipient):
         raise ApiError("RECIPIENT_INVALID", fields={"recipient": "이메일 주소가 아니에요. name@company.co.kr 처럼 고치면 보내기가 열려요."})
     if not (rebuttal.claim_number or "").strip():
         raise ApiError("CLAIM_NUMBER_REQUIRED", fields={"claimNumber": "접수번호를 넣어야 보험사가 사건을 찾을 수 있어요. 보험사 접수 문자나 메일에 있어요."})
 
-    # 첨부 준비 (PDF는 없으면 지금 만든다)
+    # 첨부 준비 (PDF는 없으면 지금 만든다). 실제 파일 바이트는 아직 읽지 않는다 —
+    # 메타데이터(파일명·크기)만으로 SendLog를 먼저 기록해 멱등키를 선점한다.
     for a in rebuttal.attachments:
         if a["kind"] == "report_pdf" and a["included"]:
-            report = await report_by_version(db, case.id, "latest")
+            report = await report_by_version(db, case_id, "latest")
             await ensure_pdf(db, case, report)
             a["refId"] = report.id
     rebuttal.attachments = [dict(a) for a in rebuttal.attachments]
     attachments = await resolve_attachments(db, rebuttal)
     video_dropped = any(a["kind"] == "video" and a.get("note") for a in attachments)
-    files: list[MailAttachment] = []
-    storage = get_storage()
+
+    attachment_names: list[str] = []
     for a in attachments:
         if not a["included"]:
             continue
         if a["kind"] == "report_pdf":
             pdf = await pdf_for(db, a["refId"])
-            files.append(MailAttachment(filename=pdf.filename, content=await storage.read_bytes(pdf.storage_key), mime_type="application/pdf"))
+            attachment_names.append(pdf.filename if pdf else a["name"])
         elif a["kind"] == "video":
             video = await db.get(Video, a["refId"])
             if video is not None:
-                files.append(MailAttachment(filename=video.filename, content=await storage.read_bytes(video.storage_key), mime_type=video.mime_type))
+                attachment_names.append(video.filename)
 
-    msg = MailMessage(
-        to=rebuttal.recipient, subject=rebuttal.subject,
-        body_text=rebuttal_body(rebuttal.body, user.email, video_dropped),
-        reply_to=user.email, sender_email=user.email, display_name=f"카-디펜더 ({user.email})", attachments=files,
-    )
     now = now_utc()
     log = SendLog(
-        id=new_id(), case_id=case.id, rebuttal_id=rebuttal.id, idempotency_key=idempotency_key, sent_at=now,
+        id=new_id(), case_id=case_id, rebuttal_id=rebuttal_id, idempotency_key=idempotency_key, sent_at=now,
         from_email=user.email, recipient=rebuttal.recipient, subject=rebuttal.subject,
-        attachment_names=[f.filename for f in files], result="failed", provider_message_id=None, error=None,
+        attachment_names=attachment_names, result="failed", provider_message_id=None, error="in_progress",
     )
+    db.add(log)
     try:
+        await db.commit()
+    except IntegrityError as e:
+        # 같은 idempotency_key로 동시에 들어온 다른 요청이 먼저 기록을 남겼다.
+        # 이 요청은 진 쪽이니, 승자의 결과를 멱등 응답으로 돌려준다 (아직 진행 중이면 실패로 본다).
+        await db.rollback()
+        winner = await _prior_send_log(db, case_id, idempotency_key)
+        if winner is not None and winner.result == "sent":
+            return _send_result(winner, len(winner.attachment_names))
+        raise ApiError("MAIL_SEND_FAILED") from e
+
+    # 초안을 선점한다: draft → sending. 다른 요청이 이미 선점/발송했다면 rowcount가 0이다.
+    claim = await db.execute(
+        update(Rebuttal).where(Rebuttal.id == rebuttal_id, Rebuttal.status == "draft").values(status="sending")
+    )
+    if claim.rowcount == 0:
+        await db.rollback()
+        raise ApiError("REBUTTAL_ALREADY_SENT")
+    await db.commit()
+    rebuttal.status = "sending"
+
+    try:
+        files: list[MailAttachment] = []
+        storage = get_storage()
+        for a in attachments:
+            if not a["included"]:
+                continue
+            if a["kind"] == "report_pdf":
+                pdf = await pdf_for(db, a["refId"])
+                files.append(MailAttachment(filename=pdf.filename, content=await storage.read_bytes(pdf.storage_key), mime_type="application/pdf"))
+            elif a["kind"] == "video":
+                video = await db.get(Video, a["refId"])
+                if video is not None:
+                    files.append(MailAttachment(filename=video.filename, content=await storage.read_bytes(video.storage_key), mime_type=video.mime_type))
+
+        msg = MailMessage(
+            to=rebuttal.recipient, subject=rebuttal.subject,
+            body_text=rebuttal_body(rebuttal.body, user.email, video_dropped),
+            reply_to=user.email, sender_email=user.email, display_name=f"카-디펜더 ({user.email})", attachments=files,
+        )
         log.provider_message_id = await get_mailer().send(msg)
         log.result = "sent"
-    except MailSendError as e:
+        log.error = None
+    except Exception as e:
+        logger.exception("반박의견서 발송 실패: case=%s rebuttal=%s", case_id, rebuttal_id)
         log.error = str(e)
-        db.add(log)
+        log.result = "failed"
+        rebuttal.status = "draft"
+        rebuttal.updated_at = now_utc()
         await db.commit()
         raise ApiError("MAIL_SEND_FAILED") from e
 
     rebuttal.status = "sent"
     rebuttal.updated_at = now
-    db.add(log)
     case_service.set_status(case, "sent")
     await db.commit()
 
-    await case_service.add_message(db, case.id, "assistant", "sent", {
+    await case_service.add_message(db, case_id, "assistant", "sent", {
         "sendLogId": log.id, "sentAt": to_kst_iso(now), "recipient": rebuttal.recipient,
         "attachmentCount": len(files), "notice": SENT_NOTICE, "nextSteps": list(SENT_NEXT_STEPS),
     })
-    hub.publish(case.id, "rebuttal.sent", {"sendLogId": log.id, "sentAt": to_kst_iso(now), "recipient": rebuttal.recipient})
-    await case_service.publish_case_updated(db, case.id)
+    hub.publish(case_id, "rebuttal.sent", {"sendLogId": log.id, "sentAt": to_kst_iso(now), "recipient": rebuttal.recipient})
+    await case_service.publish_case_updated(db, case_id)
     return _send_result(log, len(files))
 
 

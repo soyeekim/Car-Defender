@@ -35,7 +35,7 @@ def upgrade() -> None:
     sa.Column('provider_message_id', sa.String(length=255), nullable=True),
     sa.Column('error', sa.Text(), nullable=True),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('idempotency_key')
+    sa.UniqueConstraint('case_id', 'idempotency_key', name='uq_send_logs_case_id_idempotency_key')
     )
     with op.batch_alter_table('send_logs', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_send_logs_case_id'), ['case_id'], unique=False)

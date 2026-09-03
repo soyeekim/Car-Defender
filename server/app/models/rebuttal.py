@@ -18,6 +18,6 @@ class Rebuttal(Base):
     subject_auto: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     attachments: Mapped[list] = mapped_column(MutableList.as_mutable(JSON), nullable=False, default=list)
-    status: Mapped[str] = mapped_column(String(10), nullable=False, default="draft")  # draft | sent
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="draft")  # draft | sending | sent
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -64,6 +64,40 @@ async def test_rebuttal_patch_rules(client, auth_headers, reported_case, settle)
     assert res.status_code == 422 and res.json()["error"]["code"] == "VALIDATION_FAILED"
 
 
+async def test_rebuttal_patch_subject_normalizes_newlines(client, auth_headers, reported_case, settle):
+    await client.post(f"/cases/{reported_case}/rebuttal", headers=auth_headers)
+    await settle()
+    url = f"/cases/{reported_case}/rebuttal"
+
+    res = await client.patch(url, json={"subject": "제목 줄1\n줄2\r\n줄3"}, headers=auth_headers)
+    assert res.status_code == 200
+    subject = res.json()["subject"]
+    assert subject == "제목 줄1 줄2 줄3"
+    assert "\n" not in subject and "\r" not in subject
+
+
+async def test_rebuttal_sending_status_blocks_edit_like_sent(client, auth_headers, reported_case, settle):
+    """발송 중(sending)인 반박의견서는 sent와 동일하게 수정할 수 없다."""
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import Rebuttal
+
+    await client.post(f"/cases/{reported_case}/rebuttal", headers=auth_headers)
+    await settle()
+
+    async with session_scope() as db:
+        rebuttal = (await db.execute(select(Rebuttal).where(Rebuttal.case_id == reported_case))).scalar_one()
+        rebuttal.status = "sending"
+        await db.commit()
+
+    g2 = (await client.get(f"/cases/{reported_case}/rebuttal", headers=auth_headers)).json()
+    assert g2["status"] == "sending" and g2["editable"] is False and g2["canSend"] is False
+
+    res = await client.patch(f"/cases/{reported_case}/rebuttal", json={"body": "x"}, headers=auth_headers)
+    assert res.status_code == 409 and res.json()["error"]["code"] == "REBUTTAL_ALREADY_SENT"
+
+
 async def test_large_video_excluded_from_attachments(client, auth_headers, reported_case, settle, monkeypatch):
     from app.services import rebuttal as rs
 

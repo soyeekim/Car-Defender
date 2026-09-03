@@ -1,5 +1,6 @@
+from email.headerregistry import Address
 from email.message import EmailMessage
-from email.utils import formataddr, make_msgid
+from email.utils import make_msgid
 
 import aiosmtplib
 
@@ -17,7 +18,7 @@ class SmtpMailer:
     async def send(self, msg: MailMessage) -> str:
         em = EmailMessage()
         display = msg.display_name or "카-디펜더"
-        em["From"] = formataddr((display, self.s.mail_from))
+        em["From"] = Address(display_name=display, addr_spec=self.s.mail_from)
         em["To"] = msg.to
         em["Subject"] = msg.subject
         if msg.sender_email:
