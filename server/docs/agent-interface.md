@@ -135,3 +135,71 @@ key = os.environ["GEMINI_API_KEY"]
 
 `revision_request` 가 있으면 다시 쓰기다. `previous_sections` 에 이전 원고가 오니 그걸 고친다.
 반박의견서를 쓸 때는 `report_sections` 로 경위서 본문이 함께 온다.
+
+## 처음 시작할 때 (개발 환경)
+
+저장소를 받은 뒤 한 번만 하면 된다.
+
+```bash
+git clone https://github.com/soyeekim/Car-Defender.git
+cd Car-Defender/server
+python -m venv .venv
+.venv/Scripts/python -m pip install -e ".[dev]"          # macOS/Linux 는 .venv/bin/python
+.venv/Scripts/python -m pip install -r ../ai/requirements.txt
+.venv/Scripts/python -m pytest tests/test_agent_contract.py -q   # MockAgent 로 통과하는지 먼저 확인
+```
+
+마지막 줄이 통과하면 준비 끝이다. 이제 `ai/` 아래에 자기 클래스를 만들고
+`AGENT_CONTRACT_IMPL` 을 자기 것으로 바꿔 가며 돌리면 된다.
+
+## 사용자에게 그대로 나가는 글
+
+아래 값은 가공 없이 화면과 문서에 실린다. 개발자용 로그가 아니라 사용자가 읽는 문장이다.
+
+| 값 | 어디에 |
+|---|---|
+| `analyze.summary_text` | 분석 완료 말풍선 |
+| `chat.reply` | 대화 말풍선 |
+| `judge.summary` / `change_reason` | 과실비율 판정 카드 |
+| `judge.basis.precedents[].body_text` | 판례 팝업 |
+| `write.sections[].body` | 경위서 본문 (PDF 로 인쇄됨) |
+| `write.body` | 반박의견서 메일 본문 |
+
+**말투는 `app/agent/mock.py` 를 따른다.** 해요체로 쉽게 쓰고, 전문 용어는 풀어 쓴다.
+사고를 당해 불안한 사람이 읽는다는 것을 전제로 한다.
+
+**단, 경위서(`write` 의 `sections`)만 예외다.** 보험사에 제출하는 문서이므로
+명세서 3.1의 규정대로 **감정 표현 없이 객관적으로 서술**한다.
+
+### 경위서 4개 섹션은 내용이 정해져 있다
+
+명세서 3.1이 정한 구성이다. `index` 순서대로 이 내용을 담는다.
+
+| `index` | 내용 |
+|---|---|
+| 1 | 일시 · 장소 |
+| 2 | 사고 경위 |
+| 3 | 영상 분석 결과 |
+| 4 | 주장 요지 |
+
+### 길이
+
+**반박의견서 본문(`write` 의 `body`)은 5000자를 넘기지 않는다.**
+생성 시점에는 막지 않지만, 사용자가 그 글을 화면에서 고치려 하면 5000자 제한에 걸려
+수정이 통째로 막힌다. 계약 테스트가 이걸 검사한다.
+
+사용자 입력은 한 번에 2000자까지라 `chat` 의 `new_message` 도 그 안이다.
+
+## 실제 화면으로 확인하기
+
+계약 테스트를 통과했다면 마지막으로 전체 흐름을 한 번 돌려 본다.
+가입부터 메일 발송까지 16단계를 자동으로 밟는다.
+
+```bash
+cd server
+AGENT_IMPL=ai.agent.real:RealAgent .venv/Scripts/python -m uvicorn app.main:app --port 8000
+# 다른 창에서
+E2E_BASE=http://localhost:8000 .venv/Scripts/python scripts/e2e_live.py 받을주소@example.com
+```
+
+여기까지 통과하면 배포에 올릴 수 있다.

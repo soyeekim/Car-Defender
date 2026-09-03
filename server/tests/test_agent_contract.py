@@ -144,6 +144,10 @@ async def test_write_rebuttal(agent):
         report_sections=report.sections,
     ))
     assert r.body and r.body.strip(), "rebuttal 인데 body 가 비었어요. 메일 본문으로 그대로 나가요."
+    assert len(r.body) <= 5000, (
+        f"반박의견서 본문이 {len(r.body)}자예요. 5000자를 넘으면 안 돼요.\n"
+        "만들 때는 통과하지만, 사용자가 그 글을 화면에서 고치려 하면 5000자 제한에 걸려 수정이 막혀요."
+    )
 
 
 def test_all_required_methods_exist():
