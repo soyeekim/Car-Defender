@@ -70,6 +70,34 @@ docker compose up -d --no-build
 올리게 되므로 그대로 둔다. editable 설치가 빌드 시점에 `app` 패키지를 찾아야 해서
 빈 `app/__init__.py`를 먼저 만들고 실제 코드로 덮어쓰는 구조다.
 
+### HTTPS까지 한 번에 (EC2 최초 1회)
+
+`deploy/` 스크립트가 준비돼 있다. `docker-compose.prod.yml`이 443 포트와 certbot
+컨테이너를 얹고, `app`의 `build:`를 지워 레지스트리 이미지만 쓰게 만든다.
+
+```bash
+git clone <저장소> && cd server
+./deploy/setup-ec2.sh          # 스왑·도커·.env 준비 (사용자 데이터로 이미 했으면 건너뜀)
+nano .env                      # APP_ENV=prod, JWT_SECRET, APP_IMAGE, SMTP_* 채우기
+docker login                   # 비공개 저장소일 때
+./deploy/issue-cert.sh me@example.com api.fairway.click
+./deploy/deploy.sh
+```
+
+인증서는 발급 후 certbot 컨테이너가 12시간마다 갱신을 시도하고, nginx는 6시간마다
+reload해서 갱신본을 반영한다. 손댈 것이 없다.
+
+이후 배포는 개발 PC에서 push하고 서버에서 한 줄이다.
+
+```bash
+./deploy/deploy.sh myid/fairway-app:v2
+```
+
+헬스체크가 90초 안에 통과하지 못하면 이전 이미지로 자동 롤백한다.
+
+도메인을 바꾸려면 `deploy/nginx-tls.conf`의 `api.fairway.click` 세 곳과
+`deploy/issue-cert.sh`의 기본값을 같이 고친다.
+
 `app` 서비스는 `env_file: .env`로 이 파일을 읽으므로 `.env`가 반드시 있어야 한다.
 `DATABASE_URL`은 compose의 `app` 서비스가
 `postgresql+asyncpg://fairway:fairway@db:5432/fairway`로 덮어쓰기 때문에
