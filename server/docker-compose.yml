@@ -19,7 +19,11 @@ services:
     # 로컬에서는 build 결과에 이 태그가 붙고, EC2에서는 .env의 APP_IMAGE가 가리키는
     # 레지스트리 이미지를 받아 쓴다 (docker compose pull && up -d --no-build).
     image: ${APP_IMAGE:-fairway-app:local}
-    build: .
+    # 컨텍스트가 저장소 루트인 이유: AI 담당 구현체(ai/)를 같은 이미지에 담아야
+    # AGENT_IMPL 이 같은 프로세스 안에서 import 할 수 있다. 제외 목록은 ../.dockerignore.
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://fairway:fairway@db:5432/fairway

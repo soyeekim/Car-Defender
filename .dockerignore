@@ -1,0 +1,42 @@
+# 빌드 컨텍스트는 저장소 루트다(server/ 와 ai/ 를 한 이미지에 담아야 하므로).
+# 여기서 걸러내지 않으면 명세서 PNG·가상환경·업로드 데이터까지 전부 Docker 데몬으로 전송된다.
+
+# 버전 관리 / 개발 도구
+.git/
+.gitignore
+.gitattributes
+**/.superpowers/
+**/.vscode/
+**/.idea/
+
+# 파이썬 부산물
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+**/venv/
+**/*.egg-info/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/htmlcov/
+**/.coverage
+
+# 비밀 값 (이미지에 들어가지 않게 이중으로 막는다)
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*credentials*.csv
+
+# 런타임에 만들어지는 것 — 이미지에 넣지 않는다
+server/data/
+
+# 이미지 실행에 필요 없는 문서·자료
+server/docs/
+server/tests/
+server/scripts/
+ai/tests/
+ai/*.md
+금융 ai 디자인/
+*.bundle
+# 프롬프트(ai/prompts/)와 설정(ai/config/)은 런타임에 읽으므로 절대 제외하지 않는다.
