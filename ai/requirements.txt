@@ -3,4 +3,7 @@ google-genai>=1.30.0,<3.0.0
 pydantic>=2.8.0
 python-dotenv>=1.0.0
 numpy>=1.26.0
+imageio-ffmpeg>=0.5.0
 pytest>=8.0.0
+# optional: CV tracking fallback (가이드 57~58절) — 필요할 때만 설치
+# ultralytics>=8.2.0

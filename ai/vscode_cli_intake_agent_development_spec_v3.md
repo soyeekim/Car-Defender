@@ -733,7 +733,7 @@ Agent:
 ```text
 GEMINI_API_KEY=...
 OPENAI_API_KEY=...
-VIDEO_MODEL=gemini-3.7-flash
+VIDEO_MODEL=gemini-3.8-flash
 INTAKE_MODEL=<GPT model ID>
 DOCUMENT_MODEL=<GPT model ID>
 REASONING_MODEL=<GPT model ID>

@@ -7,14 +7,33 @@ import shutil
 import subprocess
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Literal, Optional
 
 import numpy as np
 from dotenv import load_dotenv
-
-from schemas.post_intake import RetrievedSource
+from pydantic import BaseModel, Field
 
 load_dotenv()
+
+
+class RetrievedSource(BaseModel):
+    source_id: str
+    parent_id: Optional[str] = None
+    source_type: Literal["deliberation_case", "fault_standard", "roundabout_special_standard"]
+    source_file: str
+    page_number: int = Field(ge=1)
+    page_start: Optional[int] = Field(default=None, ge=1)
+    page_end: Optional[int] = Field(default=None, ge=1)
+    chunk_index: int = Field(ge=0)
+    similarity_score: float
+    semantic_score: Optional[float] = None
+    lexical_score: Optional[float] = None
+    case_number: Optional[str] = None
+    chart_number: Optional[str] = None
+    decision_ratio: Optional[str] = None
+    matched_child_ids: list[str] = Field(default_factory=list)
+    matched_sections: list[str] = Field(default_factory=list)
+    excerpt: str
 
 _ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PDF_PATHS = [
@@ -550,7 +569,9 @@ def search_index(
     top_k: int = 12,
     ensure_source_diversity: bool = True,
     embedder: Optional[Callable[[list[str], str], np.ndarray]] = None,
+    source_types: Optional[set[str]] = None,
 ) -> list[RetrievedSource]:
+    """source_types를 주면 해당 자료 유형(deliberation_case 등)만 대상으로 검색한다."""
     children, embeddings, manifest = load_index(index_dir)
     parents = load_parent_documents(index_dir)
     parents_by_id = {item["parent_id"]: item for item in parents}
@@ -571,6 +592,13 @@ def search_index(
         supporting = [float(child_scores[index]) for index in ordered[1:3]]
         parent_scores[parent_id] = best if not supporting else best * 0.88 + np.mean(supporting) * 0.12
     ranked_parent_ids = sorted(parent_scores, key=parent_scores.get, reverse=True)
+    if source_types:
+        ranked_parent_ids = [
+            parent_id for parent_id in ranked_parent_ids if parents_by_id[parent_id]["source_type"] in source_types
+        ]
+        ensure_source_diversity = False
+        if not ranked_parent_ids:
+            return []
 
     limit = max(1, min(top_k, len(ranked_parent_ids)))
     selected_ids = ranked_parent_ids[:limit]
