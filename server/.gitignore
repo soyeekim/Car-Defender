@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Local data (uploads, pdfs, sqlite)
+data/
+*.db
+*.sqlite3
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# AWS 자격 증명 CSV 등 (실수로 커밋되는 것 방지)
+*credentials*.csv
+*.pem
+
+# subagent-driven-development 작업 원장 (로컬 전용)
+.superpowers/

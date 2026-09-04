@@ -1,0 +1,49 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fairway
+      POSTGRES_PASSWORD: fairway
+      POSTGRES_DB: fairway
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # nginx가 유일한 진입점이다. 로컬에서 psql로 직접 붙어야 하면
+    # "127.0.0.1:5432:5432" 처럼 루프백에만 바인딩해서 연다.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fairway"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    # 로컬에서는 build 결과에 이 태그가 붙고, EC2에서는 .env의 APP_IMAGE가 가리키는
+    # 레지스트리 이미지를 받아 쓴다 (docker compose pull && up -d --no-build).
+    image: ${APP_IMAGE:-fairway-app:local}
+    # 컨텍스트가 저장소 루트인 이유: AI 담당 구현체(ai/)를 같은 이미지에 담아야
+    # AGENT_IMPL 이 같은 프로세스 안에서 import 할 수 있다. 제외 목록은 ../.dockerignore.
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://fairway:fairway@db:5432/fairway
+      STORAGE_LOCAL_DIR: /data
+    volumes:
+      - ./data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    # 앱 포트를 호스트에 열지 않는다: nginx가 유일한 진입점이어야
+    # 레이트리밋(앱 내부 메모리 기준)과 접속 IP 신뢰가 의미를 가진다.
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - app
+
+volumes:
+  pgdata:

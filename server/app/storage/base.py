@@ -1,0 +1,29 @@
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
+from pathlib import Path
+from typing import Protocol
+
+CHUNK = 1024 * 1024
+
+
+class StorageBackend(Protocol):
+    async def put_file(self, key: str, src_path: Path) -> int: ...
+    async def put_bytes(self, key: str, data: bytes) -> int: ...
+    async def size(self, key: str) -> int: ...
+    def read_range(self, key: str, start: int, end: int) -> AsyncIterator[bytes]: ...
+    async def read_bytes(self, key: str) -> bytes: ...
+    async def delete(self, key: str) -> None: ...
+    def local_path(self, key: str) -> AbstractAsyncContextManager[Path]: ...
+    def healthy(self) -> bool: ...
+
+
+def validate_key(key: str) -> str:
+    if (
+        not key
+        or key.startswith("/")
+        or "\\" in key
+        or ":" in key
+        or ".." in key.split("/")
+    ):
+        raise ValueError(f"잘못된 스토리지 키: {key!r}")
+    return key
