@@ -19,8 +19,8 @@
     "master_case_validation": "v1",
     "master_fault_assessment": "v3",
     "master_respond": "v2",
-    "document_system": "v2",
+    "document_system": "v3",
     "document_incident_report": "v2",
-    "document_rebuttal_opinion": "v2"
+    "document_rebuttal_opinion": "v3"
   }
 }

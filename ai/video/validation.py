@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -451,6 +452,23 @@ def should_use_cv_tracking(result: VideoResult, threshold: float = 0.80) -> bool
     return result.collision_pair.confidence < threshold or not result.vehicle_identity_consistent
 
 
+_OPPONENT_CANDIDATE = re.compile(
+    r"([가-힣A-Za-z]{1,6}(?:색)?\s?(?:승용차|승합차|SUV|트럭|화물차|버스|택시|오토바이|이륜차|경차|차량))\s*\((vehicle_\d+)\)"
+)
+
+
+def _opponent_candidate_from_text(result: VideoResult) -> str:
+    """요약·상세 서술에 '흰색 승용차(vehicle_2)'처럼 적힌, 목록에 없는 상대 차량 후보를 찾는다."""
+    known = {vehicle.id for vehicle in result.vehicles}
+    ego = result.ego_vehicle_id or "vehicle_1"
+    for text in (result.short_summary or "", result.detailed_description or ""):
+        for match in _OPPONENT_CANDIDATE.finditer(text):
+            desc, vehicle_id = match.group(1).strip(), match.group(2)
+            if vehicle_id != ego and vehicle_id not in known and "블랙박스" not in desc:
+                return desc
+    return ""
+
+
 def user_confirmation_question(result: VideoResult) -> str:
     """가이드 59절: 영상으로 확정 불가 시 사용자에게 사고 당사 차량을 객관적으로 확인한다."""
     count = len(result.vehicles)
@@ -464,9 +482,16 @@ def user_confirmation_question(result: VideoResult) -> str:
         return descriptions.get(vehicle_id, vehicle_id)
 
     if count < 2:
-        # 상대 차량 자체를 식별하지 못한 경우: 어느 차량들이 충돌했는지 고르게 할 수 없다
+        # 상대 차량 자체를 목록(inventory)에 넣지 못한 경우. 요약문에는 "흰색 승용차(vehicle_2)"처럼 상대 차량이
+        # 적혀 있을 수 있으므로, 그 후보를 인용해 "찾지 못했다"는 모순된 말을 피한다.
+        candidate = _opponent_candidate_from_text(result)
+        if candidate:
+            return (
+                f"영상 설명에서는 상대 차량이 {candidate}로 보이지만, 차량 목록에서 확정하지는 못했어요. "
+                f"상대 차량이 {candidate}가 맞나요? 어느 쪽(좌/우/앞/뒤)에서 왔는지도 알려주시면 그 정보로 영상을 다시 확인할게요."
+            )
         return (
-            "영상에서 충돌한 상대 차량을 분명하게 찾지 못했어요. "
+            "영상 분석에서 상대 차량을 확정하지 못했어요. "
             "상대 차량이 어느 쪽(좌/우/앞/뒤)에서 온 어떤 차량(색상·차종)이었는지 알려주시면 그 정보로 영상을 다시 확인할게요."
         )
     lines = [f"영상에서 차량이 {count}대 보여요."]

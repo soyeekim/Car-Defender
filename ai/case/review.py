@@ -165,7 +165,8 @@ def generate_case_review_questions(
         return summary, [], rechecks
     # 구체적인 검토 질문을 한 번도 못 냈고 재분석 요청도 없을 때만 '추가 정황' 열린 질문을 한 번 둔다
     if not questions and not rechecks and state.review_rounds == 0 and ADDITIONAL_FACTS_FIELD not in state.asked_fields:
-        questions = [Question(field=ADDITIONAL_FACTS_FIELD, question=_ADDITIONAL_FACTS_QUESTION, importance="medium", phase="case_review", why="판정 전 추가 정황 확인")]
+        # 열린 질문이라 '확인 이유'를 붙이면 군더더기다 (질문 자체가 이유를 말한다)
+        questions = [Question(field=ADDITIONAL_FACTS_FIELD, question=_ADDITIONAL_FACTS_QUESTION, importance="medium", phase="case_review", why=None)]
 
     previous = {item.field: item for item in state.pending_questions}
     for question in questions:

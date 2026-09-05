@@ -472,7 +472,7 @@ class MasterAccidentAgent:
                 text = format_questions(intro if intro else self._ack(events, is_initial, state), questions)
                 if first_turn:
                     text = self._with_second_pass_note(state, text)
-                recheck_note = self._recheck_note(events)
+                recheck_note = self._recheck_note(events, state)
                 if recheck_note:
                     text = recheck_note + "\n" + text
                 if explicit_conclusion:
@@ -685,13 +685,27 @@ class MasterAccidentAgent:
         kept = [item for item in sentences if not re.search(r"(다시\s*(확인|분석)|재분석|재확인)", item)]
         return " ".join(kept).strip()
 
-    @staticmethod
-    def _recheck_note(events: list[str]) -> str:
+    def _recheck_note(self, events: list[str], state: CaseState) -> str:
+        """이번 턴에 영상을 다시 봤으면 한 줄로 알린다. Video Agent에 준 지시문(내부 프롬프트)은 보여주지 않고,
+        달라진 결론만 사용자 문장으로 요약한다."""
         done = [event for event in events if event.startswith("영상 focus 재분석 완료")]
         if not done:
             return ""
-        topics = [item.split("[", 1)[1].split("]", 1)[0] for item in done[:2] if "[" in item and "]" in item]
-        return "영상에서 확인할 수 있는 부분은 다시 분석했어요 (" + "; ".join(topics) + ")."
+        changes: list[str] = []
+        video = state.video_analysis
+        for item in done[:2]:
+            raw = item.split("]: ", 1)[1] if "]: " in item else ""
+            if not raw or raw == "기존 결론 유지":
+                continue
+            for piece in raw.split(", "):
+                piece = piece.strip()
+                if piece and piece != "재분석 상세 서술 보완":
+                    text = self._humanize_change(video, piece) if video is not None else piece
+                    if text and text not in changes:
+                        changes.append(text[:120])
+        if changes:
+            return "말씀해 주신 내용을 바탕으로 영상을 다시 확인했어요. 달라진 점: " + "; ".join(changes[:2]) + "."
+        return "말씀해 주신 내용을 바탕으로 영상을 다시 확인했는데, 결론은 그대로예요."
 
     def _sufficiency(self, state: CaseState) -> SufficiencyResult:
         # 판정이 이미 완료되어 유효하면 LLM 보강 없이 deterministic 체크만 수행한다 (턴당 호출 절감)
@@ -802,12 +816,15 @@ class MasterAccidentAgent:
         lines = []
         if is_initial:
             lines.append(self._video_intro(state))
+        else:
+            # 방금 받은 답을 먼저 받아 주고 사례로 넘어간다 (답 → 사례가 바로 붙으면 대화가 끊긴 느낌이 든다)
+            lines.append(self._review_ack(events))
+        recheck_note = self._recheck_note(events, state)
+        if recheck_note:
+            lines.append(recheck_note)
         lines.append(self._cases_block(state))
         if summary:
             lines.append(summary)
-        recheck_note = self._recheck_note(events)
-        if recheck_note:
-            lines.append(recheck_note)
         lines.append("아직 과실비율을 판정하지 않았어요. 판정 전에 한 가지만 확인할게요." if len(questions) == 1 else "아직 과실비율을 판정하지 않았어요. 판정 전에 몇 가지만 더 확인할게요.")
         lines.append(format_questions("", questions))
         data = {
@@ -863,14 +880,14 @@ class MasterAccidentAgent:
             summary, questions = self._review_step(state, events, progress)
             if questions:
                 prefix = "확인했어요. " if answered_now else ""
-                recheck_note = self._recheck_note(events)
+                recheck_note = self._recheck_note(events, state)
                 text = prefix + (recheck_note + "\n" if recheck_note else "") + "판정 전에 한 가지만 더 확인할게요.\n" + format_questions("", questions)
                 return self._respond(state, message=text, action="ASK_USER", data={"questions": [q.model_dump() for q in questions], "agent_reasoning": questions[0].reasoning, "review": True, "review_summary": summary}, warnings=warnings)
 
         # 검토 완료 → Agent가 판정 준비 완료를 판단하고 종합 판정
         mark_review_done(state, "검토 질문 확인 완료")
         events.append("심의사례 검토 완료 → 종합 판정")
-        recheck_note = self._recheck_note(events)
+        recheck_note = self._recheck_note(events, state)
         intro = (recheck_note + "\n" if recheck_note else "") + (
             "확인해 주신 내용과 유사 심의사례를 종합해서 예상 과실비율을 판정할게요." if self.defer_conclusions
             else "확인해 주신 내용과 유사 심의사례를 종합해서 예상 과실비율을 판정했어요."
@@ -886,17 +903,39 @@ class MasterAccidentAgent:
         video = state.video_analysis
         if video is None:
             return "영상 분석 결과가 없어서 말씀해 주신 내용을 기준으로 진행할게요."
-        summary = video.short_summary.strip() or "영상 분석을 마쳤어요."
-        vehicles = ", ".join(f"{v.id}({v.description or '설명 없음'}{', 블랙박스 차량' if v.is_ego else ''})" for v in video.vehicles)
+        # 영상 모델이 쓴 요약에는 vehicle_1 같은 내부 ID가 섞여 있다 → 사용자에게는 차량 설명으로 바꿔 보여준다
+        summary = self._humanize_vehicle_ids(video, video.short_summary.strip()) or "영상 분석을 마쳤어요."
+        names = self._vehicle_names(video)
+        vehicles = ", ".join(("블랙박스 차량(자차)" if v.is_ego else names[v.id]) for v in video.vehicles)
         pair = video.collision_pair
         pair_text = ""
         if len(pair.participants) == 2:
-            pair_text = f" 충돌한 두 차량은 {pair.participants[0]}과(와) {pair.participants[1]}로 보여요(신뢰도 {pair.confidence:.2f})."
+            first, second = (names.get(pid, pid) for pid in pair.participants)
+            pair_text = f" 충돌한 두 차량은 {first}과(와) {second}로 보여요(신뢰도 {pair.confidence:.2f})."
         second_pass = ""
         changes = self._second_pass_changes(video)
         if len(video.analysis_passes) >= 2 and changes:
             second_pass = " 2차 분석에서 보완된 내용: " + "; ".join(changes) + "."
         return f"영상을 분석했어요. {summary} 영상에서 확인된 차량: {vehicles or '없음'}.{pair_text}{second_pass}"
+
+    @staticmethod
+    def _vehicle_names(video: VideoResult) -> dict[str, str]:
+        """vehicle_N → 사용자에게 보여줄 이름 (블랙박스 차량 / 흰색 승용차 / 상대 차량)."""
+        names: dict[str, str] = {}
+        for vehicle in video.vehicles:
+            desc = (vehicle.description or "").strip()
+            names[vehicle.id] = "블랙박스 차량" if vehicle.is_ego else (desc[:20] if desc else "상대 차량")
+        return names
+
+    @classmethod
+    def _humanize_vehicle_ids(cls, video: VideoResult, text: str) -> str:
+        """'흰색 승용차(vehicle_2)' → '흰색 승용차', 홀로 쓰인 'vehicle_2' → 차량 설명."""
+        if not text:
+            return text
+        names = cls._vehicle_names(video)
+        text = re.sub(r"\s*\((vehicle_\d+)\)", "", text)  # 설명 뒤에 붙은 ID 괄호는 지운다
+        text = re.sub(r"(?<![A-Za-z_])(vehicle_\d+)(?![A-Za-z0-9_])", lambda m: names.get(m.group(1), "상대 차량" if m.group(1) != "vehicle_1" else "블랙박스 차량"), text)
+        return text
 
     _CHANGE_FIELD_LABELS = {
         "turn_signal": "방향지시등", "braking": "제동", "brake": "제동", "lane_change": "차로 변경", "movement": "진행 방향",
@@ -911,33 +950,34 @@ class MasterAccidentAgent:
     def _second_pass_changes(cls, video: VideoResult, limit: int = 3) -> list[str]:
         """changes_from_previous 는 영상 모델이 쓴 내부 표현(vehicle_2.turn_signal, CONFIRMED 0.85)이 섞여 있다.
         사용자에게 보여줄 때는 차량 설명·한국어 필드명으로 바꾸고 상태 토큰은 지운다."""
-        names: dict[str, str] = {}
-        for vehicle in video.vehicles:
-            desc = (vehicle.description or "").strip()
-            names[vehicle.id] = ("블랙박스 차량" if vehicle.is_ego else (desc[:20] if desc else "상대 차량"))
         items: list[str] = []
         for raw in video.changes_from_previous:
             if raw == "재분석 상세 서술 보완":
                 continue
-            text = raw
-
-            def _field(match: "re.Match[str]") -> str:
-                vehicle_name = names.get(match.group(1), match.group(1))
-                field = match.group(2)
-                label = cls._CHANGE_FIELD_LABELS.get(field.lower())
-                return f"{vehicle_name} {label}" if label else f"{vehicle_name} {field}"
-
-            text = re.sub(r"(?<![A-Za-z_])(vehicle_\d+)\.([A-Za-z_]+)", _field, text)
-            text = re.sub(r"(?<![A-Za-z_])(vehicle_\d+)(?![A-Za-z0-9_])", lambda m: names.get(m.group(1), m.group(1)), text)
-            text = cls._CHANGE_STATUS_PATTERN.sub("", text)
-            text = re.sub(r"['\"]([A-Za-z_]+)['\"]", lambda m: cls._CHANGE_VALUE_LABELS.get(m.group(1).lower(), m.group(1)), text)
-            text = re.sub(r"\bcollision pair\b", "충돌 차량 조합", text)
-            text = re.sub(r"\s{2,}", " ", text).strip(" ;,")
+            text = cls._humanize_change(video, raw)
             if text and text not in items:
                 items.append(text[:160])
             if len(items) >= limit:
                 break
         return items
+
+    @classmethod
+    def _humanize_change(cls, video: VideoResult, raw: str) -> str:
+        """changes_from_previous 항목 하나를 사용자 문장으로 바꾼다."""
+        names = cls._vehicle_names(video)
+
+        def _field(match: "re.Match[str]") -> str:
+            vehicle_name = names.get(match.group(1), match.group(1))
+            field = match.group(2)
+            label = cls._CHANGE_FIELD_LABELS.get(field.lower())
+            return f"{vehicle_name} {label}" if label else f"{vehicle_name} {field}"
+
+        text = re.sub(r"(?<![A-Za-z_])(vehicle_\d+)\.([A-Za-z_]+)", _field, raw)
+        text = re.sub(r"(?<![A-Za-z_])(vehicle_\d+)(?![A-Za-z0-9_])", lambda m: names.get(m.group(1), m.group(1)), text)
+        text = cls._CHANGE_STATUS_PATTERN.sub("", text)
+        text = re.sub(r"['\"]([A-Za-z_]+)['\"]", lambda m: cls._CHANGE_VALUE_LABELS.get(m.group(1).lower(), m.group(1)), text)
+        text = re.sub(r"\bcollision pair\b", "충돌 차량 조합", text)
+        return re.sub(r"\s{2,}", " ", text).strip(" ;,")
 
     @classmethod
     def _with_second_pass_note(cls, state: CaseState, text: str) -> str:
@@ -983,13 +1023,24 @@ class MasterAccidentAgent:
             lines = [f"현재 사건과 비슷한 심의사례예요 (최대 {top_k}개)."]
         for case in state.retrieved_cases[:top_k]:
             rel = case.relevance
-            lines.append(
-                f"- {case.case_id} {case.title or ''} | {case.ratio_summary()}"
-                + (f" | 공통점: {', '.join(rel.matched_factors[:3])}" if rel and rel.matched_factors else "")
-                + (f" | 차이점: {', '.join(rel.different_factors[:2])}" if rel and rel.different_factors else "")
-            )
+            lines.append(f"- {case.case_id} {case.title or ''} · {case.ratio_summary()}".rstrip())
+            if rel and rel.matched_factors:
+                lines.append(f"  공통점: {', '.join(rel.matched_factors[:3])}")
+            if rel and rel.different_factors:
+                lines.append(f"  차이점: {', '.join(rel.different_factors[:2])}")
         lines.append("심의사례의 사실관계는 현재 사건과 다를 수 있어서, 차이점을 함께 살펴볼게요.")
         return "\n".join(lines)
+
+    @staticmethod
+    def _review_ack(events: list[str]) -> str:
+        """답변 직후 사례를 보여줄 때 붙이는 연결 문장."""
+        unknown = [event for event in events if event.startswith("사용자가 모른다고 답함")]
+        added = [event for event in events if event.startswith("새 사실 반영")]
+        if unknown and not added:
+            return "확인했어요. 기억나지 않는 부분은 '확인되지 않음'으로 두고 진행할게요. 지금까지 확인된 내용으로 비슷한 심의사례를 찾아봤어요."
+        if added:
+            return "확인했어요. 말씀해 주신 내용을 반영해서 비슷한 심의사례를 찾아봤어요."
+        return "확인했어요. 지금까지 확인된 내용으로 비슷한 심의사례를 찾아봤어요."
 
     def _ack(self, events: list[str], is_initial: bool, state: CaseState) -> str:
         if is_initial:

@@ -34,6 +34,7 @@ from agent.presenters import (
     change_reason_text,
     estimate_page_count,
     judge_summary,
+    readable_lines,
     ordered_cases,
     parse_opponent_claim,
     precedent_body_text,
@@ -123,9 +124,9 @@ class RealAgent:
         if not summary_text:
             summary_text = self.master.video_intro(state)
         return {
-            "summary_text": summary_text,
+            "summary_text": readable_lines(summary_text),
             "facts": pack_facts(state, verdict_version=0, extra=self._claim_extra(state, {})),
-            "questions": question_cards,
+            "questions": [readable_lines(card) for card in question_cards],
             "title": build_case_title(state),
             "video_meta": build_video_meta(state),
         }
@@ -153,7 +154,7 @@ class RealAgent:
                     # 백엔드가 '경위서 먼저' 잠금 카드를 붙이므로 여기서는 이유만 짧게
                     reply = "반박의견서에는 사건경위서가 첨부돼요. 먼저 사건경위서를 만들어야 보낼 수 있어요."
         return {
-            "reply": reply,
+            "reply": readable_lines(reply),
             "next_action": next_action,
             "fact_updates": pack_facts(state, verdict_version=verdict_version, extra=self._claim_extra(state, facts)),
         }
@@ -179,8 +180,8 @@ class RealAgent:
         return {
             "ratio_mine": assessment.fault_ratio.user,
             "ratio_other": assessment.fault_ratio.opponent,
-            "summary": judge_summary(assessment, state),
-            "change_reason": change_reason_text(previous, assessment, invalidation_reasons),
+            "summary": readable_lines(judge_summary(assessment, state)),
+            "change_reason": readable_lines(change_reason_text(previous, assessment, invalidation_reasons)),
             "opponent_claim": claim,
             "basis": {"chart": build_chart(state, assessment, cases), "precedents": precedents},
         }

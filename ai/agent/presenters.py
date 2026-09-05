@@ -147,6 +147,20 @@ def question_card(question: Question, *, first: bool = False) -> str:
     return ("하나만 물어볼게요. " + text) if first else text
 
 
+# 문장이 끝나는 자리(…요. / …다. / ? / !) 뒤의 공백. 숫자 뒤 마침표("1. 항목", "0.85")와 괄호 안("…해요.)")은 문장 끝으로 보지 않는다.
+_SENTENCE_BREAK = re.compile(r"(?<=[가-힣A-Za-z)\]\"'”’…][.!?])[ \t]+(?=[가-힣A-Z(\"'“‘\d])")
+
+
+def readable_lines(text: Optional[str]) -> Optional[str]:
+    """말풍선에서 한 문장이 한 줄이 되게 문장 사이 공백을 줄바꿈으로 바꾼다. 이미 있는 줄바꿈은 그대로 둔다.
+
+    프론트는 말풍선에 whitespace-pre-line 을 써서 이 줄바꿈을 그대로 보여 준다 (server/docs/frontend-guide.md)."""
+    if not text:
+        return text
+    lines = [_SENTENCE_BREAK.sub("\n", line.rstrip()) for line in text.split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
 def split_initial_response(message: str, questions: list[Question]) -> tuple[str, list[str]]:
     """create_case 응답을 (분석 완료 말풍선, 질문 카드) 로 나눈다. 질문 본문은 말풍선에서 뺀다."""
     if not questions:
@@ -278,46 +292,138 @@ def precedent_title(case: RetrievedCase) -> str:
     return title[:60]
 
 
+# 팝업 본문의 제목 줄. 프론트는 이 목록에 있는 문단을 소제목으로 그릴 수 있다 (precedent-image-spec.md)
+PRECEDENT_SECTION_LABELS = (
+    "사고 유형", "사고 내용", "쟁점", "과실비율", "심의 이유", "적용 수정요소", "참고 인정기준", "기본 과실비율", "수정요소",
+    "내 사건과 비슷한 점", "내 사건과 다른 점", "판정에서의 역할",
+)
+_RATIO_ONLY_LINE = re.compile(r"^\s*(청구|피청구|A|B)\s*차량?\s*\d{1,3}\s*%")
+# 심의문은 '~사고임', '~결정함'처럼 마침표 없이 끝나는 문장이 많다 → 그 어미 뒤 공백을 문장 경계로 본다
+_SENTENCE_END = re.compile(r"(사고임|사례임|결정함|판단함|고려함|정하였음|하였음|인정됨|판단됨|정한다|결정한다|[.;])\s+(?=[가-힣A-Z(])")
+_NARRATIVE_END = re.compile(r"(사고임|사고로|사고이므로|사고임\.|사고\.)$")
+
+
+# PDF 줄바꿈 자리에서 단어가 "사 고로서", "도 표", "우 측도로"처럼 끊겨 나온다. 자주 쓰이는 낱말 안의 공백만 붙인다.
+_DOMAIN_WORDS = (
+    "사고 도표 진로 우측 좌측 차량 교차로 신호 직진 좌회전 우회전 피청구 청구 과실 비율 안전지대 후행 선행 진입 충돌 충격 통과 상황 결정 "
+    "직후 회전 변경 차로 정지 서행 확인 판단 고려 기본 수정 요소 위반 신뢰 운전 주의 의무 방향 도로 횡단 보행자 추돌 접촉 정차 주차 후진 "
+    "출발 개시 완료 적용 산정 인정 심의 사례 지점 현장 약도 동태 회피 신호기 사거리 삼거리 점멸 황색 적색 녹색 방향지시등 감속 일시정지 선진입 후진입"
+).split()
+_SPLIT_WORD = re.compile("|".join(sorted({f"{w[:i]} {w[i:]}" for w in _DOMAIN_WORDS for i in range(1, len(w))}, key=len, reverse=True)))
+_DANGLING_PARTICLE = re.compile(r"(?<=[가-힣]) (을|를|로|의|에|와|과|도|가|은|는|에서|으로|에게|까지|부터)(?=[ ,.;)]|$)")
+
+
+def _clean_case_text(text: str, chart_number: Optional[str] = None) -> str:
+    """PDF 2단 레이아웃에서 본문 사이에 낀 '참고 / 인정기준 / 도표번호' 조각과 줄바꿈 잔재를 지운다."""
+    cleaned = " " + text.replace("\n", " ") + " "
+    cleaned = cleaned.replace(" 참고 ", " ").replace(" 인정기준 ", " ").replace("●", " ")
+    if chart_number:
+        # 본문에 낀 도표 번호 조각만 지운다. "도표 252-4" 처럼 더 긴 번호의 일부는 남긴다
+        cleaned = re.sub(rf"(?<![\d(\-])\s{re.escape(chart_number)}(?![\d)\-])", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = _SPLIT_WORD.sub(lambda m: m.group(0).replace(" ", ""), cleaned)
+    cleaned = _DANGLING_PARTICLE.sub(r"\1", cleaned)
+    return cleaned.strip(" .;")
+
+
+def _sentences(text: str, chart_number: Optional[str] = None) -> list[str]:
+    """한 문장씩 한 문단으로 보여 주기 위해 문장을 나눈다."""
+    cleaned = _clean_case_text(text, chart_number)
+    if not cleaned:
+        return []
+    out = []
+    for piece in _SENTENCE_END.sub(lambda m: m.group(1) + "\n", cleaned).split("\n"):
+        piece = piece.strip(" ;")
+        if len(piece) < 4:
+            continue
+        out.append(piece if piece.endswith((".", "다", "요")) else piece + ".")
+    return out
+
+
 def precedent_body_text(case: RetrievedCase, assessment: Optional[FaultAssessment] = None) -> str:
-    """H37 판례 팝업 본문 (해요체). 판정 시점에 반드시 채운다."""
-    lines: list[str] = []
-    description = (case.accident_description or case.excerpt or "").strip().replace("\n", " ")
+    """H37 심의사례 팝업 본문. 그 심의사례(또는 도표)의 내용만 항목별로 정리한다 — 내 사건과의 비교나 판정 계산은 판정 카드가 말한다.
+
+    프론트는 빈 줄(\\n\\n) 단위로 <p> 를 만들므로 소제목 한 줄, 문장 하나가 각각 문단이다."""
+    paragraphs: list[str] = []
+    chart = case.chart_number
     if case.source_type == "deliberation_case":
-        head = f"심의사례 {case.case_id}"
-        if case.accident_type:
-            head += f" — {case.accident_type}"
-        lines.append(head + "예요.")
-        if description:
-            lines.append("사고 개요: " + description[:300] + ("…" if len(description) > 300 else ""))
-        ratio = _ratio_line(case)
-        if ratio:
-            lines.append(ratio + ".")
-        if case.decision_reasons:
-            lines.append("심의 이유: " + "; ".join(item.strip() for item in case.decision_reasons[:2]) + ".")
-        if case.modification_factors:
-            lines.append("적용된 수정요소(기본 비율에서 더하거나 뺀 조건): " + ", ".join(item.strip() for item in case.modification_factors[:4]) + ".")
-    else:
-        head = "과실비율 인정기준 도표"
-        if case.chart_number:
-            head += f" {case.chart_number}"
-        if case.title:
-            head += f" — {case.title}"
-        lines.append(head + "예요.")
-        if description:
-            lines.append("사고 유형: " + description[:300] + ("…" if len(description) > 300 else ""))
+        kind = (case.accident_type or case.title or "").strip()
+        place = ""
+        if case.title and " - " in case.title:
+            place = case.title.split(" - ", 1)[1].strip()
+        if kind:
+            paragraphs += ["사고 유형", kind + (f" · {place}" if place and place not in kind else "")]
+
+        reasons = [item for item in case.decision_reasons if item.strip() and not _RATIO_ONLY_LINE.match(item)]
+        narrative: list[str] = []
+        if reasons:
+            first = _sentences(reasons[0], chart)
+            if first and _NARRATIVE_END.search(first[0].rstrip(".")) or (first and "충돌" in first[0] and "사고" in first[0]):
+                narrative = first[:1]
+                rest_first = first[1:]
+                reasons = ([" ".join(rest_first)] if rest_first else []) + reasons[1:]
+        if not narrative:
+            description = _sentences(case.accident_description or case.excerpt or "", chart)
+            narrative = description[:1]
+        if narrative:
+            paragraphs += ["사고 내용", *narrative]
+
+        issues = [item.strip(" ●.") for item in case.key_issues if item.strip()]
+        if issues:
+            paragraphs += ["쟁점", *[item + ("" if item.endswith((".", "부", "무")) else "") for item in issues[:3]]]
+
+        ratio_bits = []
         if case.basic_ratio:
-            lines.append(f"기본 과실비율은 {case.basic_ratio}예요.")
-        if case.modification_factors:
-            lines.append("수정요소(기본 비율에서 더하거나 빼는 조건): " + ", ".join(item.strip() for item in case.modification_factors[:5]) + ".")
+            ratio_bits.append(f"기본 {case.basic_ratio}")
+        if case.decision_ratio:
+            ratio_bits.append(f"결정 {case.decision_ratio}")
+        if ratio_bits:
+            paragraphs += ["과실비율", " → ".join(ratio_bits) + " (A 청구차량 : B 피청구차량)"]
+
+        reason_sentences: list[str] = []
+        for item in reasons:
+            reason_sentences += _sentences(item, chart)
+        if reason_sentences:
+            paragraphs += ["심의 이유", *reason_sentences[:6]]
+
+        factors = [_clean_case_text(item, chart).lstrip("● ").strip() for item in case.modification_factors]
+        factors = [item.removeprefix("과실비율 산정 수정요소 :").removeprefix("과실비율 산정 수정요소:").strip() for item in factors if item]
+        if factors:
+            paragraphs += ["적용 수정요소", *factors[:4]]
+        if chart:
+            paragraphs += ["참고 인정기준", f"도표 {chart}"]
+    else:
+        head = "과실비율 인정기준 도표" + (f" {chart}" if chart else "")
+        paragraphs.append(head)
+        if case.title:
+            paragraphs += ["사고 유형", case.title.strip()]
+        description = _sentences(case.accident_description or case.excerpt or "", chart)
+        if description:
+            paragraphs += ["사고 내용", *description[:2]]
+        if case.basic_ratio:
+            paragraphs += ["기본 과실비율", case.basic_ratio]
+        factors = [_clean_case_text(item, chart).lstrip("● ").strip() for item in case.modification_factors if item.strip()]
+        if factors:
+            paragraphs += ["수정요소", *factors[:8]]
+    # 사례 내용 다음에 "내 사건과 무엇이 같고 다른가"를 항목별로 붙인다 (리랭커가 '항목: 내용' 꼴로 써 준다)
     relevance = case.relevance
     if relevance:
-        if relevance.matched_factors:
-            lines.append("내 사건과 비슷한 점: " + ", ".join(item.strip() for item in relevance.matched_factors[:4]) + ".")
-        if relevance.different_factors:
-            lines.append("다른 점: " + ", ".join(item.strip() for item in relevance.different_factors[:3]) + ".")
-    if assessment is not None and assessment.anchor_case_id == case.case_id:
-        lines.append("이 사례의 비율을 기준값으로 삼아 내 사건의 예상 과실비율을 계산했어요.")
-    text = "\n".join(lines).strip()
+        matched = [item.strip(" .") for item in relevance.matched_factors if item.strip()]
+        different = [item.strip(" .") for item in relevance.different_factors if item.strip()]
+        if matched:
+            paragraphs += ["내 사건과 비슷한 점", *matched[:4]]
+        if different:
+            paragraphs += ["내 사건과 다른 점", *different[:3]]
+    if assessment is not None:
+        ratio = case.decision_ratio or case.basic_ratio
+        if assessment.anchor_case_id == case.case_id:
+            role = "가장 비슷한 사례예요. " + (f"이 사례의 결정비율 {ratio}을 " if ratio else "이 사례의 비율을 ") + "기준값으로 삼아 내 사건의 예상 과실비율을 계산했어요."
+        elif case.case_id in assessment.primary_case_ids:
+            role = "판정 근거로 함께 참고한 사례예요."
+        else:
+            role = "비교를 위해 함께 살펴본 사례예요."
+        paragraphs += ["판정에서의 역할", role]
+    text = "\n\n".join(paragraph for paragraph in paragraphs if paragraph).strip()
     return text or f"심의사례 {case.case_id}에 대한 설명이에요."
 
 

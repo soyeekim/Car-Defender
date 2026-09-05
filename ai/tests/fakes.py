@@ -416,7 +416,6 @@ class FakeTextClient:
     def _document_rebuttal_opinion(self, user: str) -> dict:
         ids = _case_ids(user)
         primary = ids[0] if ids else "2018-070162"
-        with_report = "<INCIDENT_REPORT>\n(없음)" not in user
         return {
             "title": "과실비율 반박의견서",
             "sections": {
@@ -431,11 +430,6 @@ class FakeTextClient:
                 "adjustment_factor_review": "방향지시등 미점등은 영상 확인이 어려워 적용하지 않았습니다.",
                 "final_opinion": "예상 과실비율 30:70이 타당하다고 판단됩니다.",
             },
-            "mail_body": (
-                "안녕하세요. 본 사고 건의 과실비율 재검토를 요청드립니다. 블랙박스 영상에서 본 차량 방향 녹색 신호가 확인됩니다. "
-                f"심의사례 {primary}에 비추어 본 차량 30 : 상대 차량 70이 타당합니다."
-                + (" (사건경위서 참조)" if with_report else "")
-            ),
             "cited_case_ids": [primary, "1234-567890"],
             "text": "",
         }

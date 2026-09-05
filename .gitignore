@@ -6,11 +6,18 @@ logs/**/*.json
 .venv/
 venv/
 .pytest_cache/
-ai/data/
+# ai
 ai/.env
 ai/logs/
 ai/.env.example
+# ai/data 는 RAG 인덱스(+심의사례 그림)만 올린다. 영상·캐시·사례 상태·원본 PDF·평가 데이터는 올리지 않는다.
+ai/data/*
+!ai/data/rag_index/
+
+# ui
 design/
-ai/logs
-car_defender_ai_development_guide.md
+
+#backend
 server/.env.example
+
+car_defender_ai_development_guide.md

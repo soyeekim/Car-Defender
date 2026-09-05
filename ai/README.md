@@ -79,6 +79,10 @@ AGENT_CONTRACT_IMPL=ai.agent.real:RealAgent AGENT_CONTRACT_VIDEO=../ai/data/mp4/
 .venv/bin/python scripts/chat_cli.py --video ../ai/data/mp4/bb_1_220804_vehicle_116_067.mp4
 ```
 
+심의사례 팝업 그림: `cd ai && python build_case_images.py` 가 원본 PDF 3종에서 표를 잘라 `data/rag_index/images/<심의번호|도표번호>.png` 와 `manifest.json` 을 만든다
+(`rag/case_images.py`, poppler-utils 필요). 백엔드는 manifest 만 읽어 `GET /api/v1/precedents/{id}/image` 로 내려준다 — RAG 인덱스처럼 **Docker 빌드 전에 한 번 만들어 둔다**.
+프론트 명세: `server/docs/precedent-image-spec.md`.
+
 | 계약 메서드 | 여기서 하는 일 |
 | --- | --- |
 | `analyze(video_path, description)` | `MasterAccidentAgent.create_case` — 영상 1차 분석 → Agent가 부족한 점을 추론해 2차 분석 → 설명에서 사실 추출 → 첫 질문 하나(`questions[0]`). 물을 것이 없으면 유사 심의사례까지 `summary_text`에 담고 `questions: []`(백엔드가 바로 judge). `facts["_case_state"]`에 Case State 전체를 직렬화해 돌려준다. |
@@ -128,6 +132,7 @@ rebuttal = generate_rebuttal(res.case_id, opponent_claim="상대 보험사는 50
 ```
 
 - 사용자에게 보이는 글은 모두 해요체다(`prompts/master_agent/system_v2.md` [TONE]). 사건경위서만 제출 문서라 합니다체·객관 서술, 반박의견서 메일 본문은 정중한 합니다체.
+- 반박의견서 메일은 **본인 가입 보험사** 담당자에게 보내는 글이다. 본문은 `document/rebuttal.py::build_mail_body` 가 코드로 조립한다 — 주장 비율(제시된 비율 / 본인 주장 비율 / 요청) → 근거(영상 확인 사실 · 유사 심의사례 3건 요약 · 수정요소) → 결론 → 첨부. 확정된 사실과 검색된 심의사례만 쓰고, "불명확하니 확인이 필요하다"류의 문장은 넣지 않는다(받는 쪽이 확인할 수 없는 내용). LLM 은 검토용 10개 섹션만 쓴다(`prompts/document_agent/rebuttal_opinion_v3.md`).
 - 질문은 한 턴에 하나(`MAX_QUESTIONS_PER_TURN=1`). 미리 정해진 질문 목록은 없다. Agent(LLM)가 사건 상태와 영상 미확인 항목만 보고 "이 사고 구조에서 판정에 영향을 주는데 확인되지 않은 요소"를 먼저 추론(`reasoning`)한 뒤 하나를 고르고, "확인 이유"를 함께 보여준다 (`prompts/master_agent/followup_question_v6.md`, `case_review_questions_v4.md`). 추론 과정은 응답 `data.agent_reasoning`과 `logs/agent_runs.jsonl`에 남는다. 코드는 guardrail만 담당한다: 영상 소유 관계는 반드시 먼저, 주관 질문·중복·영상으로 재확인 가능한 항목 금지, LLM 호출 실패 시에만 코드 후보(`DEFAULT_QUESTIONS`)로 대체. Agent가 "더 물을 것이 없다"고 판단하면 억지로 채우지 않는다. 심의사례 검색 전 Agent 질문은 `MAX_FACT_QUESTION_ROUNDS`(2)회까지.
 - 영상 호출 최소화(가이드 63절): 1차 분석에서 충돌 pair가 확정되면 **Master Agent가 1차 결과를 읽고 "무엇이 부족한지" 추론해 2차 분석 지시서를 쓰고**(`prompts/master_agent/video_gap_plan_v1.md`: 다시 볼 항목 + 시간 구간 + 목표 필드 + 충돌 직전 서술 보완), Video Agent가 그 지시서로 **딱 한 번** 더 본다. 지시서에서 이미 CONFIRMED이거나 화각 밖인 항목은 코드가 제거하고, LLM 실패 시 코드 규칙(`build_factor_sweep_focus`)이 대신 지시서를 만든다. 그래서 일반적인 사건은 영상 호출 2회가 모두 첫 턴에 끝나고, 대화 중에는 영상을 다시 부르지 않는다. 2차 분석의 상세 서술은 Case State·판정·사건경위서 입력에 포함된다. `VIDEO_FACTOR_SWEEP=false`로 끌 수 있다.
 - 대화 중 미확인 요소가 화면에 찍히는 것(노면 실선/점선, 정지선, 본인 방향 신호, 차로 위치, 제동, 충돌 부위)이면 사용자에게 묻지 않는다. sweep이 이미 본 주제면 그 결과를 쓰고, 새 쟁점이면 Agent가 `video_recheck_targets`로 focus 재분석을 요청한다(사건당 `MASTER_MAX_RECHECKS`=1회). 코드 guardrail(`case/questions.py::classify_video_topic`)이 LLM이 잘못 물으려 해도 재분석/폐기로 돌리고, 영상 분석이 "화각 밖/보이지 않음"이라 명시했거나 재분석 후에도 미확인이면 그때 사용자에게 묻는다.

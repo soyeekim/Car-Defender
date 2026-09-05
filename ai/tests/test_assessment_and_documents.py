@@ -201,10 +201,13 @@ def test_rebuttal_without_opponent_claim_does_not_invent_one(tmp_path):
     document = generate_rebuttal_opinion(client, package, run_logger=quiet_logger(tmp_path))
     assert "제공되지 않았습니다" in document.sections["opponent_claim"]
     assert "1234-567890" not in document.text
-    assert document.cited_case_ids == ["2018-070162"]
+    # 메일 본문이 심의사례를 최대 3건 요약하므로 인용 목록에도 함께 들어간다 (입력에 있는 번호만)
+    assert "2018-070162" in document.cited_case_ids and "1234-567890" not in document.cited_case_ids
+    assert set(document.cited_case_ids) <= {"2018-070162", "2019-034537"}
     assert "10. 최종 의견" in document.text
     assert "예상치" in document.text
-    assert document.mail_body and "2018-070162" in document.mail_body and "(사건경위서 참조)" not in document.mail_body
+    assert document.mail_body and "2018-070162" in document.mail_body and "첨부:" not in document.mail_body  # 경위서 없이 만들면 첨부 안내도 없다
+    assert "현재 제시된 과실비율" not in document.mail_body  # 상대 주장이 없으면 만들어내지 않는다
 
 
 def test_rebuttal_mail_body_uses_report_and_stays_within_limit(tmp_path):
@@ -220,7 +223,7 @@ def test_rebuttal_mail_body_uses_report_and_stays_within_limit(tmp_path):
     )
     prompt = [user for task, user in client.calls if task == "document_rebuttal_opinion"][-1]
     assert "[1. 사고 일시 및 장소]" in prompt and "직진 중 우측 진입 차량과 충돌" in prompt
-    assert "(사건경위서 참조)" in document.mail_body
+    assert "3. 결론" in document.mail_body and "첨부" not in document.mail_body  # 첨부 안내는 메일 본문에 쓰지 않는다
     assert compose_mail_body(document) == document.mail_body
     # mail_body 가 없으면 섹션으로 만들고, 길면 덜 중요한 섹션부터 뺀다
     document.mail_body = ""
@@ -240,3 +243,28 @@ def test_rebuttal_uses_provided_opponent_claim(tmp_path):
     assert document.generation_method == "deterministic_fallback"
     assert "50:50" in document.sections["opponent_claim"]
     assert "2018-070162" in document.sections["similar_cases"]
+
+
+def test_rebuttal_mail_is_structured_for_own_insurer(tmp_path):
+    """메일은 본인 보험사 담당자에게: 주장 비율 → 근거(영상 사실/심의사례 요약/수정요소) → 결론. 불명확·확인 요청 문장은 싣지 않는다."""
+    from document.rebuttal import build_mail_body
+
+    state = _ready_state()
+    client = FakeTextClient()
+    state.fault_assessment = assess_fault_ratio(client, state, state.retrieved_cases, run_logger=quiet_logger(tmp_path))
+    state.opponent_claim = "상대 보험사 주장: 나 40 : 상대 60"
+    state.uncertain_facts.append("상대 차량의 신호 상태가 불명확함")
+    package = build_verified_package(state)
+    package.verified_facts.append("상대 차량 신호 상태는 확인되지 않음")  # 불명확한 항목은 걸러진다
+    body = build_mail_body(package, report_attached=True)
+
+    assert body.startswith("담당자님께,")
+    assert "귀사 자동차보험 계약자로서" in body  # 받는 쪽은 본인 보험사
+    assert "1. 주장하는 과실비율" in body and "2. 주장 근거" in body and "3. 결론" in body
+    assert "- 현재 제시된 과실비율: 나 40 : 상대 60" in body
+    assert "- 본인이 주장하는 과실비율: 나 30 : 상대 70" in body
+    assert "유사 심의사례" in body and "심의사례 2018-070162" in body and "사고 개요:" in body
+    assert "첨부" not in body and body.endswith("감사합니다.")
+    for banned in ("불명확", "확인이 필요", "추가적인 확인", "확인되지 않음"):
+        assert banned not in body
+    assert len(body) <= 5000

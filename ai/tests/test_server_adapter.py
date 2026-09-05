@@ -176,7 +176,7 @@ def _reach_judged(tmp_path):
     precedents = judged["basis"]["precedents"]
     assert precedents[0]["id"] == "2018-070162" and precedents[0]["title"]
     assert all(p["body_text"].strip() for p in precedents)
-    assert "기준값" in precedents[0]["body_text"]
+    assert "과실비율" in precedents[0]["body_text"] and "\n\n" in precedents[0]["body_text"]  # 사례 내용만, 문단 구조
     _json_safe(judged)
     return agent, facts, messages, judged
 
@@ -240,7 +240,7 @@ def test_write_report_and_rebuttal_follow_contract(tmp_path):
     ))
     assert rebuttal["body"] and len(rebuttal["body"]) <= 5000
     assert "2018-070162" in rebuttal["body"] and "1234-567890" not in rebuttal["body"]
-    assert "(사건경위서 참조)" in rebuttal["body"]
+    assert "첨부" not in rebuttal["body"] and "본인이 주장하는 과실비율: 나 30 : 상대 70" in rebuttal["body"]
 
 
 def test_write_works_from_snapshot_when_judge_cache_is_gone(tmp_path):
@@ -386,3 +386,119 @@ def test_second_pass_changes_are_humanized():
     assert "없음으로" in items[0] and "none" not in items[0]
     assert items[1].startswith("노란색 승합차 제동:") and "UNKNOWN" not in items[1]
     assert items[2].startswith("충돌 차량 조합 변경") and "블랙박스 차량" in items[2] and "vehicle_1" not in items[2]
+
+
+def test_video_intro_and_recheck_note_hide_internal_ids():
+    from agents.master_agent import MasterAccidentAgent
+    from video.schemas import VehicleEntry, VideoResult
+
+    video = VideoResult(
+        short_summary="블랙박스 차량(vehicle_1)이 교차로를 직진하던 중 좌측에서 진입한 흰색 승용차(vehicle_2)와 충돌한 사고입니다.",
+        vehicles=[VehicleEntry(id="vehicle_1", description="블랙박스 촬영 차량 (자차)", is_ego=True), VehicleEntry(id="vehicle_2", description="흰색 승용차")],
+    )
+    text = MasterAccidentAgent._humanize_vehicle_ids(video, video.short_summary)
+    assert "vehicle_" not in text and "흰색 승용차와" in text and "블랙박스 차량이" in text
+
+    state = CaseState()
+    state.video_analysis = video
+    agent = MasterAccidentAgent(text_client=None, video_agent=None, rag_tool=None, document_agent=None, run_logger=None)  # type: ignore[arg-type]
+    intro = agent._video_intro(state)
+    assert "vehicle_" not in intro and "블랙박스 차량(자차), 흰색 승용차" in intro
+
+    # 재분석 안내: 내부 지시문 대신 달라진 결론만
+    events = ["영상 focus 재분석 완료 [충돌 시점 전후에서 실제 접촉한 두 차량을 재검증하라. 상대 차량이 vehicle inventory에 없으면]: vehicle_2 추가: 좌측에서 진입한 흰색 승용차, collision pair 확정: ['vehicle_1', 'vehicle_2']"]
+    note = agent._recheck_note(events, state)
+    assert note.startswith("말씀해 주신 내용을 바탕으로 영상을 다시 확인했어요. 달라진 점:")
+    assert "재검증하라" not in note and "inventory" not in note and "vehicle_2" not in note
+    assert agent._recheck_note(["영상 focus 재분석 완료 [x]: 기존 결론 유지"], state).endswith("결론은 그대로예요.")
+    assert agent._recheck_note([], state) == ""
+
+
+def test_review_ack_and_opponent_candidate_question():
+    from agents.master_agent import MasterAccidentAgent
+    from video.schemas import VehicleEntry, VideoResult
+    from video.validation import user_confirmation_question
+
+    assert MasterAccidentAgent._review_ack(["사용자가 모른다고 답함: other_vehicle.turn_signal"]).startswith("확인했어요. 기억나지 않는 부분은")
+    assert "반영해서" in MasterAccidentAgent._review_ack(["새 사실 반영: 상대 차 깜빡이 안 켬"])
+    assert MasterAccidentAgent._review_ack([]).startswith("확인했어요.")
+
+    # 요약문에는 상대 차량이 적혀 있지만 목록에는 없는 경우 → '찾지 못했다'가 아니라 후보를 확인한다
+    video = VideoResult(
+        short_summary="블랙박스 차량(vehicle_1)이 직진 중 좌측에서 중앙선을 넘어 진입한 흰색 승용차(vehicle_2)와 충돌한 사고입니다.",
+        vehicles=[VehicleEntry(id="vehicle_1", description="블랙박스 촬영 차량", is_ego=True)],
+        ego_vehicle_id="vehicle_1",
+    )
+    question = user_confirmation_question(video)
+    assert "흰색 승용차" in question and "찾지 못했어요" not in question and "맞나요" in question
+    video.short_summary = "충돌 사고입니다."
+    assert user_confirmation_question(video).startswith("영상 분석에서 상대 차량을 확정하지 못했어요.")
+
+
+def test_precedent_body_text_is_structured_case_only():
+    """팝업 글은 그 심의사례 내용만, 소제목 + 문장 하나 = 문단 하나. 내 사건 비교·기준값 문장은 넣지 않는다."""
+    from agent.presenters import PRECEDENT_SECTION_LABELS, precedent_body_text
+    from state.case_state import CaseRelevance, RetrievedCase
+
+    case = RetrievedCase(
+        case_id="2017-045140",
+        title="차대차 직진 대 좌회전 사고(맞은편) - 사거리 교차로(상대 차량이 맞은편 방향에서 진입)",
+        accident_type="차대차 직진 대 좌회전 사고(맞은편)",
+        chart_number="213(나)",
+        basic_ratio="80:20",
+        decision_ratio="70:30",
+        accident_description="신호에 직진하던 피청구차량과 충돌한 사고임 (나) A차량이 황색신호에 진입하여 참고 신호위반을 하였다 인정기준 213(나) 는 점에서",
+        key_issues=["청구차량이 황색신호에 교차로 진입하였는지 여부", "녹색신호에 직진한 피청구차량의 과실 유무"],
+        decision_reasons=[
+            "청구차량이 교차로의 신호가 좌회전신호에서 황색신호로 바뀌었음에도 좌회전하여 교차로에 진입하다가 우 측도로에서 녹색신호로 바뀌자마자 직진하던 피청구차량과 충돌한 사고임",
+            "청구차량이 황색신호로 바뀌었음에도 교차로에 꼬리물기식으로 진입하였던 점, 피청구차량은 교차로의 상황 을 살피지 않고 녹색신호로 바뀌자마자 직진을 하여 교차로에 진입하였던 점 고려하여 결정함",
+            "청구차량 70% ● 피청구차량 30%",
+        ],
+        relevance=CaseRelevance(case_id="2017-045140", relevance=0.9, matched_factors=["사거리 교차로"], different_factors=["상대 차량 진입 방향"]),
+    )
+    text = precedent_body_text(case)
+    paragraphs = text.split("\n\n")
+    labels = [p for p in paragraphs if p in PRECEDENT_SECTION_LABELS]
+    # 사례 내용 → 내 사건과의 비교 순서. 판정 정보가 없으면 '판정에서의 역할'은 없다
+    assert labels == ["사고 유형", "사고 내용", "쟁점", "과실비율", "심의 이유", "참고 인정기준", "내 사건과 비슷한 점", "내 사건과 다른 점"]
+    assert "사거리 교차로" in text
+    i = paragraphs.index("사고 내용")
+    assert paragraphs[i + 1].startswith("청구차량이 교차로의 신호가") and paragraphs[i + 1].endswith("충돌한 사고임.")
+    assert "70% ● 피청구차량" not in text and "참고 신호위반" not in text
+    assert "기본 80:20 → 결정 70:30 (A 청구차량 : B 피청구차량)" in paragraphs
+    assert "도표 213(나)" in paragraphs
+    # 심의 이유는 문장마다 한 문단
+    j = paragraphs.index("심의 이유")
+    assert paragraphs[j + 1].startswith("청구차량이 황색신호로 바뀌었음에도") and paragraphs[j + 1].endswith("결정함.")
+    assert paragraphs[paragraphs.index("내 사건과 비슷한 점") + 1] == "사거리 교차로"
+    assert paragraphs[paragraphs.index("내 사건과 다른 점") + 1] == "상대 차량 진입 방향"
+
+    # 판정 정보가 있으면 이 사례가 판정에서 어떤 역할이었는지 한 줄 덧붙인다
+    from state.case_state import FaultAssessment, FaultRatio
+
+    assessment = FaultAssessment(fault_ratio=FaultRatio(user=30, opponent=70), anchor_case_id="2017-045140", primary_case_ids=["2017-045140"])
+    with_role = precedent_body_text(case, assessment).split("\n\n")
+    assert with_role[-2] == "판정에서의 역할" and with_role[-1].startswith("가장 비슷한 사례예요. 이 사례의 결정비율 70:30을 기준값으로")
+    assessment.anchor_case_id = "other"
+    assessment.primary_case_ids = []
+    assert precedent_body_text(case, assessment).endswith("비교를 위해 함께 살펴본 사례예요.")
+
+    chart = RetrievedCase(case_id="차1-1", source_type="fault_standard", title="녹색직진 대 적색직진", chart_number="차1-1", basic_ratio="0:100", modification_factors=["A 현저한 과실 +10", "A 중대한 과실 +20"])
+    chart_text = precedent_body_text(chart)
+    assert chart_text.startswith("과실비율 인정기준 도표 차1-1") and "기본 과실비율\n\n0:100" in chart_text and "수정요소\n\nA 현저한 과실 +10" in chart_text
+
+
+def test_readable_lines_breaks_after_sentences_only():
+    from agent.presenters import readable_lines
+
+    text = "확인했어요. 한 가지만 더 확인할게요. 상대 차량이 깜빡이를 켰나요? 속도는 0.85 정도예요. 1. 첫째 2. 둘째 (mp4 권장 · 최대 200MB · 3분 이내)"
+    assert readable_lines(text) == (
+        "확인했어요.\n한 가지만 더 확인할게요.\n상대 차량이 깜빡이를 켰나요?\n속도는 0.85 정도예요.\n1. 첫째 2. 둘째 (mp4 권장 · 최대 200MB · 3분 이내)"
+    )
+    # 이미 있는 줄바꿈과 빈 줄은 그대로, 괄호 안 마침표는 문장 끝이 아니다
+    card = "하나만 물어볼게요. 상대 차가 깜빡이를 켰나요?\n(확인 이유: 방향지시등 미점등은 수정요소예요.)"
+    assert readable_lines(card) == "하나만 물어볼게요.\n상대 차가 깜빡이를 켰나요?\n(확인 이유: 방향지시등 미점등은 수정요소예요.)"
+    assert readable_lines("- 2017-045140 제목 · 기본 80:20, 결정 70:30\n  공통점: 사거리 교차로\n\n심의사례의 사실관계는 다를 수 있어요.") == (
+        "- 2017-045140 제목 · 기본 80:20, 결정 70:30\n  공통점: 사거리 교차로\n\n심의사례의 사실관계는 다를 수 있어요."
+    )
+    assert readable_lines(None) is None and readable_lines("") == ""
