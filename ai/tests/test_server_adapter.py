@@ -1,0 +1,388 @@
+"""백엔드 Agent 계약(server/docs/agent-interface.md) 어댑터 검증 — 네트워크 없이 Fake 구성요소로.
+
+흐름: analyze(영상+설명) → chat(질문 답변…) → next_action=verdict → judge → chat(경위서) → create_report → write(report)
+      → write(rebuttal) → 새 사실 → rejudge(change_reason) → 문서 다시 쓰기. facts 는 항상 JSON 직렬화 가능해야 한다.
+"""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from agent.codec import META_KEY, STATE_KEY, pack_facts, unpack_state
+from agent.presenters import build_case_title, parse_opponent_claim, question_card
+from agent.real import RealAgent, prepare_video_path
+from agents.document_agent import DocumentAgent
+from agents.master_agent import MasterAccidentAgent
+from agents.video_agent import VideoAnalysisAgent
+from fakes import FakeRagTool, FakeTextClient, FakeVideoAnalyzer, quiet_logger
+from state.case_state import CaseState, Question
+from video.cache import VideoResultCache
+
+ANSWERS = {
+    "video_source.vehicle_owner": "내 차 블랙박스야",
+    "other_vehicle.turn_signal": "상대는 깜빡이 안 켰어.",
+    "ego_vehicle.entered_first": "내가 먼저 들어가 있었어.",
+    "review.additional_facts": "없어요",
+    "accident_datetime.date": "2026년 8월 22일 사고였어.",
+}
+
+
+def Turn(role, text):  # noqa: N802  백엔드 ChatTurn 흉내
+    return SimpleNamespace(role=role, text=text)
+
+
+def Verdict(version, mine, other, summary="", basis=None, opponent_claim=None):  # noqa: N802
+    return SimpleNamespace(version=version, ratio_mine=mine, ratio_other=other, summary=summary, basis=basis or {}, opponent_claim=opponent_claim)
+
+
+def Section(index, title, body):  # noqa: N802
+    return SimpleNamespace(index=index, title=title, body=body)
+
+
+def build_real_agent(tmp_path, *, text_client=None, video_kwargs=None) -> tuple[RealAgent, FakeVideoAnalyzer, FakeTextClient]:
+    logger = quiet_logger(tmp_path)
+    client = text_client or FakeTextClient()
+    analyzer = FakeVideoAnalyzer(run_logger=logger, **(video_kwargs or {}))
+    master = MasterAccidentAgent(
+        text_client=client,
+        video_agent=VideoAnalysisAgent(analyzer=analyzer, cache=VideoResultCache(tmp_path / "cache", enabled=False), run_logger=logger, factor_sweep=True),
+        rag_tool=FakeRagTool(client, run_logger=logger),
+        document_agent=DocumentAgent(client=client, run_logger=logger),
+        run_logger=logger,
+    )
+    from agent.cache import JudgeCache
+
+    return RealAgent(master=master, cache=JudgeCache(tmp_path / "judge")), analyzer, client
+
+
+def _video(tmp_path):
+    video = tmp_path / "blackbox.mp4"
+    video.write_bytes(b"fake")
+    return str(video)
+
+
+def _json_safe(value):
+    json.dumps(value, ensure_ascii=False)
+
+
+def _answer_for(state_facts) -> str:
+    state = unpack_state(state_facts[STATE_KEY])
+    field = state.pending_questions[0].field if state.pending_questions else ""
+    return ANSWERS.get(field, "모르겠어요")
+
+
+def _chat(agent, facts, messages, text, *, verdict=None, has_report=False):
+    inp = SimpleNamespace(messages=list(messages), new_message=text, facts=dict(facts), questions=[], verdict=verdict, has_video=True, has_report=has_report)
+    result = agent.chat(inp)
+    facts = {**facts, **result["fact_updates"]}  # 백엔드의 얕은 병합
+    messages = messages + [Turn("user", text), Turn("assistant", result["reply"])]
+    return result, facts, messages
+
+
+def _run_until_verdict(agent, tmp_path, description="사거리에서 직진하다가 우측에서 온 차와 부딪혔어."):
+    analysis = agent.analyze(SimpleNamespace(video_path=_video(tmp_path), video_mime="video/mp4", description=description))
+    facts = dict(analysis["facts"])
+    messages = [Turn("user", description), Turn("assistant", analysis["summary_text"])] + [Turn("assistant", q) for q in analysis["questions"]]
+    result = None
+    for _ in range(8):
+        result, facts, messages = _chat(agent, facts, messages, _answer_for(facts))
+        if result["next_action"] == "verdict":
+            break
+    assert result is not None and result["next_action"] == "verdict", (result or {}).get("reply")
+    return analysis, result, facts, messages
+
+
+# --------------------------------------------------------------------------- analyze
+
+
+def test_analyze_returns_summary_question_title_and_packed_state(tmp_path):
+    agent, analyzer, _ = build_real_agent(tmp_path)
+    result = agent.analyze(SimpleNamespace(video_path=_video(tmp_path), video_mime="video/mp4", description="사거리에서 직진하다가 사고났어."))
+    assert [call["focus"] for call in analyzer.calls] == [None, "agent_gap_fill"]  # 영상 2회, 모두 분석 단계에서
+    assert result["summary_text"].strip() and "블랙박스인가요" not in result["summary_text"]  # 질문은 말풍선에서 뺀다
+    assert len(result["questions"]) == 1
+    assert result["questions"][0].startswith("하나만 물어볼게요.") and "블랙박스인가요" in result["questions"][0]
+    assert result["title"].startswith("교차로 직진 측면 충돌 · ")
+    assert result["video_meta"] == {"speed_kph": None, "impact_at_sec": 5}
+    facts = result["facts"]
+    _json_safe(facts)
+    assert facts[META_KEY]["impl"] == "ai.agent.real:RealAgent" and facts[META_KEY]["verdict_version"] == 0
+    assert facts["key_facts"] and facts["stage"] == "FACT_COLLECTING"
+    restored = unpack_state(facts[STATE_KEY])
+    assert restored.video_analyzed and restored.pending_questions[0].field == "video_source.vehicle_owner"
+    assert restored.conversation_history == []  # 대화는 백엔드가 준다
+    assert len(json.dumps(facts, ensure_ascii=False)) < 60_000
+
+
+def test_analyze_without_questions_goes_straight_to_verdict(tmp_path):
+    class NothingToAsk(FakeTextClient):
+        def _master_followup_question(self, user):
+            return {"reasoning": ["물을 것 없음"], "video_recheck_targets": [], "intro": "", "questions": []}
+
+        def _master_case_review_questions(self, user):
+            return {"reasoning": ["검토할 것 없음"], "summary": "", "video_recheck_targets": [], "questions": []}
+
+    agent, _, _ = build_real_agent(tmp_path, text_client=NothingToAsk())
+    description = "내 차 블랙박스야. 사거리에서 직진하다가 사고났어."
+    result = agent.analyze(SimpleNamespace(video_path=_video(tmp_path), video_mime="video/mp4", description=description))
+    # 설명에서 영상 소유 관계가 이미 확인됐고 Agent가 물을 것이 없다고 판단 → 분석 말풍선에 유사 심의사례까지 보여주고
+    # '추가 정황' 열린 질문 하나만 남긴다 (판정은 아직)
+    assert "비슷한 심의사례" in result["summary_text"] and "2018-070162" in result["summary_text"]
+    assert len(result["questions"]) == 1 and "추가로 알려주실" in result["questions"][0]
+    facts = result["facts"]
+    messages = [Turn("user", description), Turn("assistant", result["summary_text"]), Turn("assistant", result["questions"][0])]
+    chat, facts, _ = _chat(agent, facts, messages, "없어요")
+    assert chat["next_action"] == "verdict", chat["reply"]
+
+
+def test_prepare_video_path_adds_extension_from_mime(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAR_DEFENDER_AGENT_TMP", str(tmp_path / "tmp"))
+    raw = tmp_path / "01ABCDEF"
+    raw.write_bytes(b"fake")
+    prepared = prepare_video_path(str(raw), "video/quicktime")
+    assert prepared.endswith(".mov") and (tmp_path / "tmp" / "videos").is_dir()
+    assert prepare_video_path(str(tmp_path / "a.mp4"), "video/mp4").endswith("a.mp4")
+
+
+# --------------------------------------------------------------------------- chat
+
+
+def test_chat_without_video_asks_for_upload(tmp_path):
+    agent, _, _ = build_real_agent(tmp_path)
+    result = agent.chat(SimpleNamespace(messages=[], new_message="교차로에서 부딪혔어요", facts={}, questions=[], verdict=None, has_video=False, has_report=False))
+    assert "영상을 올려" in result["reply"] and result["next_action"] == "none" and result["fact_updates"] == {}
+
+
+def _reach_judged(tmp_path):
+    """analyze → chat 답변들 → next_action=verdict → judge 까지. (agent, facts, messages, judged)"""
+    agent, analyzer, client = build_real_agent(tmp_path)
+    analysis, result, facts, messages = _run_until_verdict(agent, tmp_path)
+    assert "계산할게요" in result["reply"]
+    state = unpack_state(facts[STATE_KEY])
+    assert state.retrieved_cases and state.fault_assessment is None  # 검색은 대화에서, 판정은 judge 에서
+    assert state.current_stage == "READY_FOR_ASSESSMENT"
+    assert len(analyzer.calls) == 2  # 대화 중 영상 추가 호출 없음
+    assert all(len(unpack_state(facts[STATE_KEY]).pending_questions) <= 1 for _ in [0])
+
+    judged = agent.judge(SimpleNamespace(messages=messages, facts=facts, previous_verdict=None))
+    assert judged["ratio_mine"] + judged["ratio_other"] == 100
+    assert judged["ratio_mine"] == 30
+    assert "나 30 : 상대 70" in judged["summary"] and "습니다" not in judged["summary"]
+    assert judged["change_reason"] is None
+    assert judged["basis"]["chart"]["name"] and "2018-070162" in judged["basis"]["chart"]["note"]
+    precedents = judged["basis"]["precedents"]
+    assert precedents[0]["id"] == "2018-070162" and precedents[0]["title"]
+    assert all(p["body_text"].strip() for p in precedents)
+    assert "기준값" in precedents[0]["body_text"]
+    _json_safe(judged)
+    return agent, facts, messages, judged
+
+
+def test_conversation_reaches_verdict_request_then_judge(tmp_path):
+    _reach_judged(tmp_path)
+
+
+def _reach_documents_requested(tmp_path):
+    agent, facts, messages, judged = _reach_judged(tmp_path)
+    verdict = Verdict(1, judged["ratio_mine"], judged["ratio_other"], judged["summary"], judged["basis"])
+    # 판정 이후 일반 질문: 판정 상세를 /tmp 캐시에서 되살려 답한다
+    result, facts, messages = _chat(agent, facts, messages, "왜 내가 30이야?", verdict=verdict)
+    assert result["next_action"] == "none" and result["reply"]
+    state = unpack_state(facts[STATE_KEY])
+    assert state.fault_assessment is not None and state.fault_assessment.anchor_case_id == "2018-070162"
+    assert facts[META_KEY]["verdict_version"] == 1 and facts["fault_ratio"] == {"mine": 30, "other": 70}
+
+    # 사건경위서 요청 → 사고 일시를 먼저 묻고 → 답하면 create_report
+    result, facts, messages = _chat(agent, facts, messages, "사건경위서 만들어줘", verdict=verdict)
+    assert result["next_action"] == "none" and "사고 일시" in result["reply"]
+    result, facts, messages = _chat(agent, facts, messages, "2026년 8월 22일 사고였어.", verdict=verdict)
+    assert result["next_action"] == "create_report", result["reply"]
+    assert "사건경위서 초안을 만들게요" in result["reply"]
+
+    # 반박의견서 요청 — 경위서가 없으면 잠금 안내, 있으면 create_rebuttal
+    result, facts, messages = _chat(agent, facts, messages, "반박의견서도 써줘", verdict=verdict, has_report=False)
+    assert result["next_action"] == "create_rebuttal" and "사건경위서" in result["reply"]
+    result, facts, messages = _chat(agent, facts, messages, "반박의견서 써줘", verdict=verdict, has_report=True)
+    assert result["next_action"] == "create_rebuttal" and "반박의견서 초안을 만들게요" in result["reply"]
+    return agent, facts, messages, verdict
+
+
+def test_after_verdict_chat_answers_and_requests_documents(tmp_path):
+    _reach_documents_requested(tmp_path)
+
+
+# --------------------------------------------------------------------------- write
+
+
+def test_write_report_and_rebuttal_follow_contract(tmp_path):
+    agent, facts, messages, verdict = _reach_documents_requested(tmp_path)
+    report = agent.write(SimpleNamespace(kind="report", messages=messages, facts=facts, verdict=verdict, revision_request=None, previous_sections=None, report_sections=None))
+    sections = report["sections"]
+    assert [s["index"] for s in sections] == [1, 2, 3, 4]
+    assert [s["title"] for s in sections] == ["사고 일시 및 장소", "사고 경위", "블랙박스 영상 분석 결과", "주장 요지"]
+    assert all(s["body"].strip() for s in sections)
+    assert "42 km/h" not in sections[1]["body"]  # grounding: 근거 없는 속도 제거
+    assert report["caveat"] and report["page_count"] >= 1
+    _json_safe(report)
+
+    revised = agent.write(SimpleNamespace(
+        kind="report", messages=messages, facts=facts, verdict=verdict, revision_request="2번을 더 간단하게",
+        previous_sections=[Section(**s) for s in sections], report_sections=None,
+    ))
+    assert len(revised["sections"]) == 4 and "(다시 씀)" in revised["sections"][1]["body"]
+
+    rebuttal = agent.write(SimpleNamespace(
+        kind="rebuttal", messages=messages, facts=facts, verdict=verdict, revision_request=None, previous_sections=None,
+        report_sections=[Section(**s) for s in sections],
+    ))
+    assert rebuttal["body"] and len(rebuttal["body"]) <= 5000
+    assert "2018-070162" in rebuttal["body"] and "1234-567890" not in rebuttal["body"]
+    assert "(사건경위서 참조)" in rebuttal["body"]
+
+
+def test_write_works_from_snapshot_when_judge_cache_is_gone(tmp_path):
+    agent, facts, messages, judged = _reach_judged(tmp_path)
+    from agent.cache import JudgeCache
+
+    agent._cache = JudgeCache(tmp_path / "empty")  # 컨테이너 재시작 등으로 /tmp 가 비워진 상황
+    verdict = Verdict(1, judged["ratio_mine"], judged["ratio_other"], judged["summary"], judged["basis"], opponent_claim={"mine": 50, "other": 50})
+    report = agent.write(SimpleNamespace(kind="report", messages=messages, facts=facts, verdict=verdict, revision_request=None, previous_sections=None, report_sections=None))
+    assert len(report["sections"]) == 4
+    rebuttal = agent.write(SimpleNamespace(kind="rebuttal", messages=messages, facts=facts, verdict=verdict, revision_request=None, previous_sections=None, report_sections=None))
+    assert rebuttal["body"]
+
+
+# --------------------------------------------------------------------------- rejudge
+
+
+def test_new_important_fact_requests_rejudge_with_change_reason(tmp_path):
+    agent, facts, messages, judged = _reach_judged(tmp_path)
+    verdict = Verdict(1, judged["ratio_mine"], judged["ratio_other"], judged["summary"], judged["basis"])
+    result, facts, messages = _chat(agent, facts, messages, "사실 내가 좌회전 중이었어", verdict=verdict)
+    assert result["next_action"] == "rejudge", result["reply"]
+    assert "다시 계산할게요" in result["reply"]
+    state = unpack_state(facts[STATE_KEY])
+    assert state.assessment_invalidated and state.assessment_invalidation_reasons
+
+    # 재판정 결과가 달라지는 상황: 확인된 수정요소가 있어야 기준값(30:70)에서 벗어난다
+    agent.master._text_client.ratio = (40, 60)
+    agent.master._text_client.confirmed_adjustment = True
+    rejudged = agent.judge(SimpleNamespace(messages=messages, facts=facts, previous_verdict=verdict))
+    assert (rejudged["ratio_mine"], rejudged["ratio_other"]) == (40, 60)
+    assert rejudged["change_reason"] and "나 30 : 상대 70에서 나 40 : 상대 60" in rejudged["change_reason"]
+    assert "내 차 진행 방향" in rejudged["change_reason"]
+
+    # 새 판정(v2)이 오면 무효화가 풀리고 상세가 되살아난다
+    verdict2 = Verdict(2, 40, 60, rejudged["summary"], rejudged["basis"])
+    result, facts, messages = _chat(agent, facts, messages, "고마워", verdict=verdict2)
+    state = unpack_state(facts[STATE_KEY])
+    assert not state.assessment_invalidated and state.fault_assessment.fault_ratio.user == 40
+    assert facts[META_KEY]["verdict_version"] == 2
+
+
+def test_document_request_survives_rejudge(tmp_path):
+    """판정 후 새 사실 + 경위서 요청 → 먼저 재판정을 요청하고, 판정이 오면 다음 메시지에서 이어서 경위서를 만든다."""
+    agent, facts, messages, judged = _reach_judged(tmp_path)
+    verdict = Verdict(1, judged["ratio_mine"], judged["ratio_other"], judged["summary"], judged["basis"])
+    result, facts, messages = _chat(agent, facts, messages, "사실 내가 좌회전 중이었어. 그리고 사건경위서 만들어줘", verdict=verdict)
+    # 경위서에 필요한 사고 일시를 먼저 묻고(요청은 pending), 답하면 새 사실 때문에 재판정을 먼저 요청한다
+    assert result["next_action"] == "none" and "사고 일시" in result["reply"], result["reply"]
+    assert unpack_state(facts[STATE_KEY]).pending_intent == "request_incident_report"
+    result, facts, messages = _chat(agent, facts, messages, "2026년 8월 22일 사고였어.", verdict=verdict)
+    assert result["next_action"] == "rejudge", result["reply"]
+    assert "이어서 사건경위서를 만들게요" in result["reply"]
+    assert unpack_state(facts[STATE_KEY]).pending_intent == "request_incident_report"
+
+    rejudged = agent.judge(SimpleNamespace(messages=messages, facts=facts, previous_verdict=verdict))
+    verdict2 = Verdict(2, rejudged["ratio_mine"], rejudged["ratio_other"], rejudged["summary"], rejudged["basis"])
+    # 판정이 오면 다음 메시지(무엇이든)에서 남겨 둔 경위서 요청을 이어서 수행한다
+    result, facts, messages = _chat(agent, facts, messages, "응", verdict=verdict2)
+    assert result["next_action"] == "create_report", result["reply"]
+    assert unpack_state(facts[STATE_KEY]).pending_intent is None
+
+
+def test_judge_rebuilds_state_when_facts_are_foreign(tmp_path):
+    """MockAgent 로 분석된 사건처럼 _case_state 가 없어도 대화만으로 판정한다."""
+    agent, _, _ = build_real_agent(tmp_path)
+    messages = [Turn("user", "교차로에서 직진 중이었는데 우측에서 오토바이가 신호를 무시하고 들어왔어요. 내 차 블랙박스야"), Turn("assistant", "영상을 분석했어요.")]
+    result = agent.judge(SimpleNamespace(messages=messages, facts={"my_lane": "2차로 직진", "opponent_signal": "red"}, previous_verdict=None))
+    assert result["ratio_mine"] + result["ratio_other"] == 100
+    assert result["basis"]["precedents"] and all(p["body_text"] for p in result["basis"]["precedents"])
+
+
+def test_opponent_claim_is_parsed_and_returned(tmp_path):
+    agent, facts, messages, judged = _reach_judged(tmp_path)
+    verdict = Verdict(1, judged["ratio_mine"], judged["ratio_other"], judged["summary"], judged["basis"])
+    result, facts, messages = _chat(agent, facts, messages, "상대 보험사가 나 50 : 상대 50 이라고 주장하는데", verdict=verdict)
+    assert facts["opponent_claim"] == {"mine": 50, "other": 50}
+    assert parse_opponent_claim("보험사는 70대30을 주장") == {"mine": 70, "other": 30}
+    assert parse_opponent_claim("과실 60% 이래요") is None
+    assert parse_opponent_claim(None, {"mine": 30, "other": 70}) == {"mine": 30, "other": 70}
+
+
+# --------------------------------------------------------------------------- presenters / codec
+
+
+def test_presenters_and_codec_helpers():
+    state = CaseState()
+    assert build_case_title(state).startswith("교통사고 · ")
+    from state.case_state import Slot
+
+    state.road.road_type = Slot(value="roundabout", source="video", status="CONFIRMED")
+    state.ego_vehicle.movement = Slot(value="straight", source="video", status="CONFIRMED")
+    state.collision.type = Slot(value="rear_end", source="video", status="CONFIRMED")
+    state.accident_datetime.date = Slot(value="2026-08-22", source="user", status="CONFIRMED")
+    assert build_case_title(state) == "회전교차로 직진 추돌 · 08-22"
+    # LLM이 enum 밖의 표현으로 추출해도 영문 키가 제목에 새지 않는다
+    state.ego_vehicle.movement = Slot(value="going_straight", source="user", status="CONFIRMED")
+    state.collision.type = Slot(value="side_swipe", source="video", status="CONFIRMED")
+    assert build_case_title(state) == "회전교차로 직진 측면 접촉 · 08-22"
+    state.ego_vehicle.movement = Slot(value="turning left", source="user", status="CONFIRMED")
+    state.road.road_type = Slot(value="signalized intersection", source="user", status="CONFIRMED")
+    assert build_case_title(state) == "교차로 좌회전 측면 접촉 · 08-22"
+    state.ego_vehicle.movement = Slot(value="weird_value", source="user", status="CONFIRMED")
+    state.collision.type = Slot(value="mystery", source="user", status="CONFIRMED")
+    assert build_case_title(state) == "교차로 충돌 · 08-22"
+    state.road.road_type = Slot(value="roundabout", source="video", status="CONFIRMED")
+    card = question_card(Question(field="other_vehicle.turn_signal", question="상대 차가 깜빡이를 켰나요?", why="방향지시등 미점등은 수정요소예요"), first=True)
+    assert card == "하나만 물어볼게요. 상대 차가 깜빡이를 켰나요?\n(확인 이유: 방향지시등 미점등은 수정요소예요)"
+    assert question_card(Question(field="video_source.vehicle_owner", question="본인 블랙박스인가요?", why="x")) == "본인 블랙박스인가요?"
+    facts = pack_facts(state, verdict_version=3)
+    _json_safe(facts)
+    assert facts[META_KEY]["verdict_version"] == 3 and unpack_state(facts[STATE_KEY]).road.road_type.value == "roundabout"
+
+
+def test_real_agent_construction_is_cheap_and_lazy(monkeypatch):
+    agent = RealAgent()
+    assert agent._master is None  # 네트워크·모델 준비는 첫 호출 때
+    with pytest.raises(AttributeError):
+        agent.nonexistent  # noqa: B018
+
+
+def test_second_pass_changes_are_humanized():
+    from agents.master_agent import MasterAccidentAgent
+    from video.schemas import VehicleEntry, VideoResult
+
+    video = VideoResult(
+        vehicles=[
+            VehicleEntry(id="vehicle_1", description="블랙박스 차량", is_ego=True),
+            VehicleEntry(id="vehicle_2", description="노란색 승합차"),
+        ],
+        changes_from_previous=[
+            "재분석 상세 서술 보완",
+            "vehicle_2.turn_signal: 00:02.5~00:05.0 구간에서 좌측 방향지시등 미점등 상태를 관찰하고 'none'(CONFIRMED, 신뢰도 0.85)으로 확정 갱신함",
+            "vehicle_2.braking: 후미등이 가려져 제동등 직접 확인 불가함을 UNKNOWN으로 명시함",
+            "collision pair 변경: ['vehicle_1', 'vehicle_3'] → ['vehicle_1', 'vehicle_2']",
+            "네 번째 항목은 잘린다",
+        ],
+    )
+    items = MasterAccidentAgent._second_pass_changes(video)
+    assert len(items) == 3
+    assert items[0].startswith("노란색 승합차 방향지시등:")
+    assert "vehicle_2" not in items[0] and "CONFIRMED" not in items[0] and "신뢰도" not in items[0]
+    assert "없음으로" in items[0] and "none" not in items[0]
+    assert items[1].startswith("노란색 승합차 제동:") and "UNKNOWN" not in items[1]
+    assert items[2].startswith("충돌 차량 조합 변경") and "블랙박스 차량" in items[2] and "vehicle_1" not in items[2]

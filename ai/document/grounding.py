@@ -66,6 +66,15 @@ def ground_document(
     if not opponent_claim_provided and "opponent_claim" in document.sections:
         document.sections["opponent_claim"] = "상대방 주장은 현재 제공되지 않았습니다. 추후 확인 시 보완이 필요합니다."
 
+    if document.mail_body:
+        # 메일 본문도 같은 검사를 거친다 (속도 수치·의도 표현·미확인 심의번호)
+        body_doc = DocumentResult(document_type=document.document_type, sections={"mail_body": document.mail_body})
+        ground_document(body_doc, fact_blob=fact_blob, allowed_case_ids=allowed, opponent_claim_provided=True)
+        document.mail_body = body_doc.sections.get("mail_body", "")
+        report.removed_sentences.extend(body_doc.grounding.removed_sentences)
+        report.flagged_claims.extend(body_doc.grounding.flagged_claims)
+        report.invalid_case_citations.extend(body_doc.grounding.invalid_case_citations)
+        cited |= set(body_doc.cited_case_ids)
     document.cited_case_ids = sorted(cited | {case_id for case_id in document.cited_case_ids if case_id in allowed})
     document.grounding = report
     if report.removed_sentences:
@@ -79,6 +88,12 @@ def ground_document(
 
 
 SECTION_TITLES = {
+    # 사건경위서 (명세서 3.1 — 4개 섹션)
+    "datetime_location": "1. 사고 일시 및 장소",
+    "accident_process": "2. 사고 경위",
+    "video_analysis": "3. 블랙박스 영상 분석 결과",
+    "claim_summary": "4. 주장 요지",
+    # 구버전(9개 섹션) 문서를 다시 읽을 때를 위한 제목
     "date_time": "1. 사고 일시",
     "location": "2. 사고 장소",
     "vehicles": "3. 차량 및 영상 기준",

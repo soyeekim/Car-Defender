@@ -385,7 +385,7 @@ class FakeTextClient:
             "reasoning_summary": ["A 차량 선진입", "유사 심의사례와 구조 유사"],
             "uncertainties": ["상대 차량 신호 확인 불가"],
             "ratio_dependencies": ["상대 차량 적색 신호가 확인되면 상대 과실 증가"],
-            "explanation": "현재 영상과 확인된 사실, 유사 심의사례를 기준으로 사용자 30 : 상대 70 수준의 과실비율이 예상됩니다.",
+            "explanation": f"가장 비슷한 심의사례 {primary}의 결정비율을 기준으로 보면 나 {user_ratio} : 상대 {opponent_ratio} 정도의 과실비율이 예상돼요. 상대 차량 신호가 확인되면 달라질 수 있어요.",
         }
 
     def _master_respond(self, user: str) -> dict:
@@ -393,25 +393,30 @@ class FakeTextClient:
 
     # -- document ----------------------------------------------------------
     def _document_incident_report(self, user: str) -> dict:
+        revision = "<REVISION_REQUEST>" in user
+        process = (
+            "본 차량은 블랙박스 촬영 차량(vehicle_1)이며 본인 차량 블랙박스 영상입니다. 본 차량은 약 42 km/h로 2차로를 직진하고 있었습니다. "
+            "본 차량은 2차로를 따라 교차로에 접근하였습니다. 우측 도로에서 상대 차량(vehicle_3)이 교차로로 진입하였고, "
+            "본 차량 전면과 상대 차량 좌측면이 충돌하였습니다. 충돌 후 양 차량은 교차로 내에 정지하였습니다."
+        )
+        if revision:
+            process = "본 차량은 2차로를 직진하던 중 우측에서 진입한 상대 차량(vehicle_3)과 충돌하였습니다. (다시 씀)"
         return {
             "title": "교통사고 사건경위서",
             "sections": {
-                "date_time": "2026년 8월 22일 사고가 발생하였습니다.",
-                "location": "신호기가 설치된 사거리 교차로입니다.",
-                "vehicles": "본 차량은 블랙박스 촬영 차량(vehicle_1)이며 상대 차량은 우측에서 진입한 택시(vehicle_3)입니다.",
-                "pre_collision": "본 차량은 약 42 km/h로 2차로를 직진하고 있었습니다. 본 차량은 2차로를 따라 교차로에 접근하였습니다.",
-                "collision_process": "우측 도로에서 상대 차량이 교차로로 진입하였습니다.",
-                "collision": "본 차량 전면과 상대 차량 좌측면이 충돌하였습니다.",
-                "post_collision": "충돌 후 양 차량은 교차로 내에 정지하였습니다.",
-                "objective_evidence": "영상에서 본 차량 진행 방향 신호가 녹색인 점이 확인됩니다. 상대 차량이 일부러 무리하게 진입한 것으로 보입니다.",
-                "notes": "상대 차량 방향 신호는 영상에서 확인되지 않습니다.",
+                "datetime_location": "2026년 8월 22일, 신호기가 설치된 사거리 교차로에서 사고가 발생하였습니다.",
+                "accident_process": process,
+                "video_analysis": "영상에서 본 차량 진행 방향 신호가 녹색인 점이 확인됩니다. 상대 차량이 일부러 무리하게 진입한 것으로 보입니다. 상대 차량 방향 신호는 영상에서 확인되지 않습니다.",
+                "claim_summary": "영상에서 확인된 사실을 근거로 본 차량 30 : 상대 차량 70의 과실비율 적용을 요청드립니다. 이는 예상 비율입니다.",
             },
+            "caveat": "상대 차량 방향의 신호는 아직 확인되지 않아서 본문에 쓰지 않았어요.",
             "text": "",
         }
 
     def _document_rebuttal_opinion(self, user: str) -> dict:
         ids = _case_ids(user)
         primary = ids[0] if ids else "2018-070162"
+        with_report = "<INCIDENT_REPORT>\n(없음)" not in user
         return {
             "title": "과실비율 반박의견서",
             "sections": {
@@ -426,6 +431,11 @@ class FakeTextClient:
                 "adjustment_factor_review": "방향지시등 미점등은 영상 확인이 어려워 적용하지 않았습니다.",
                 "final_opinion": "예상 과실비율 30:70이 타당하다고 판단됩니다.",
             },
+            "mail_body": (
+                "안녕하세요. 본 사고 건의 과실비율 재검토를 요청드립니다. 블랙박스 영상에서 본 차량 방향 녹색 신호가 확인됩니다. "
+                f"심의사례 {primary}에 비추어 본 차량 30 : 상대 차량 70이 타당합니다."
+                + (" (사건경위서 참조)" if with_report else "")
+            ),
             "cited_case_ids": [primary, "1234-567890"],
             "text": "",
         }

@@ -148,9 +148,46 @@ def _enforce_anchor(assessment: FaultAssessment, anchor: Optional[RetrievedCase]
     return assessment
 
 
+_USER_RATIO_MENTION = re.compile(r"(?:나|사용자|본인)\s*(?:\([^)]*\))?\s*(?:차량)?\s*(\d{1,3})\s*[:：]\s*(?:상대(?:방|측)?)\s*(?:차량)?\s*(\d{1,3})")
+
+
+def _enforce_direction(assessment: FaultAssessment) -> FaultAssessment:
+    """모델이 먼저 정한 책임 방향(more_at_fault)과 숫자가 반대면 숫자를 뒤집는다.
+
+    심의사례의 청구:피청구 순서를 그대로 옮기다가 사용자/상대 방향이 뒤집히는 실수를 막는 코드 레벨 guardrail이다.
+    """
+    direction = assessment.more_at_fault
+    user, opponent = assessment.fault_ratio.user, assessment.fault_ratio.opponent
+    flipped = (direction == "opponent" and user > opponent) or (direction == "user" and user < opponent)
+    if not flipped:
+        return assessment
+    assessment.fault_ratio = FaultRatio(user=opponent, opponent=user)
+    if assessment.possible_range:
+        swapped = []
+        for item in assessment.possible_range:
+            parsed = parse_ratio(item)
+            swapped.append(f"{parsed[1]}:{parsed[0]}" if parsed else item)
+        assessment.possible_range = swapped
+    assessment.reasoning_summary.insert(
+        0,
+        f"[방향 보정] 모델이 '{'상대' if direction == 'opponent' else '사용자'} 책임이 더 크다'고 판단했는데 숫자는 반대({user}:{opponent})로 적어, "
+        f"나(user) {opponent} : 상대(opponent) {user}로 바로잡았습니다.",
+    )
+    return assessment
+
+
+def _sync_explanation_ratio(assessment: FaultAssessment) -> FaultAssessment:
+    """설명문 안의 '나 X : 상대 Y' 표기를 최종 비율로 맞춘다 (방향 보정·기준값 적용 뒤 숫자가 바뀔 수 있다)."""
+    final = f"나 {assessment.fault_ratio.user} : 상대 {assessment.fault_ratio.opponent}"
+    if assessment.explanation:
+        assessment.explanation = _USER_RATIO_MENTION.sub(final, assessment.explanation)
+    return assessment
+
+
 def _validate(assessment: FaultAssessment, retrieved_cases: list[RetrievedCase], *, provisional: bool) -> FaultAssessment:
     allowed = {item.case_id for item in retrieved_cases}
     assessment.fault_ratio = _normalize_ratio(assessment.fault_ratio)
+    assessment = _enforce_direction(assessment)
     assessment = _enforce_anchor(assessment, select_anchor_case(retrieved_cases))
     assessment.most_likely = assessment.fault_ratio.as_text()
     assessment.possible_range = _normalize_range(assessment.possible_range)
@@ -186,10 +223,10 @@ def _validate(assessment: FaultAssessment, retrieved_cases: list[RetrievedCase],
             assessment.possible_range = [f"{max(0, user - 10)}:{min(100, 100 - user + 10)}", f"{min(100, user + 10)}:{max(0, 90 - user)}"]
     if not assessment.explanation:
         assessment.explanation = (
-            f"현재 영상과 확인된 사실, 유사 심의사례를 기준으로 사용자 {assessment.fault_ratio.user} : 상대 {assessment.fault_ratio.opponent} "
-            "수준의 과실비율이 예상됩니다. 이는 예상치이며 확정 판단이 아닙니다."
+            f"영상과 확인된 사실, 유사 심의사례를 기준으로 보면 나 {assessment.fault_ratio.user} : 상대 {assessment.fault_ratio.opponent} "
+            "정도의 과실비율이 예상돼요. 예상치라 확정된 판단은 아니에요."
         )
-    return assessment
+    return _sync_explanation_ratio(assessment)
 
 
 def deterministic_assessment(state: CaseState, retrieved_cases: list[RetrievedCase], *, reason: str) -> FaultAssessment:
@@ -208,7 +245,7 @@ def deterministic_assessment(state: CaseState, retrieved_cases: list[RetrievedCa
             f"자동 판정 사유: {reason}",
         ],
         uncertainties=["LLM 종합 판정이 수행되지 않은 임시 결과", "청구/피청구 방향과 사용자/상대 방향의 일치 여부 미검증"] + state.uncertain_facts[:5],
-        explanation="현재는 유사 심의사례의 기본비율만 참고한 임시 예상치입니다. 추가 사실 확인 후 재판정이 필요합니다.",
+        explanation="지금은 유사 심의사례의 기본비율만 참고한 임시 예상치예요. 사실을 더 확인한 뒤 다시 판정해야 해요.",
     )
     return _validate(assessment, retrieved_cases, provisional=True)
 

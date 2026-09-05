@@ -47,12 +47,34 @@ class DocumentAgent:
     def build_package(self, state: CaseState) -> VerifiedCasePackage:
         return build_verified_package(state)
 
-    def generate_incident_report(self, state: CaseState) -> DocumentResult:
+    def generate_incident_report(
+        self,
+        state: CaseState,
+        *,
+        revision_request: Optional[str] = None,
+        previous_sections: Optional[dict[str, str]] = None,
+    ) -> DocumentResult:
         package = self.build_package(state)
-        return generate_incident_report(self.client, package, run_logger=self.run_logger, temperature=self.settings.agent.document_temperature)
+        return generate_incident_report(
+            self.client, package, run_logger=self.run_logger, temperature=self.settings.agent.document_temperature,
+            revision_request=revision_request, previous_sections=previous_sections,
+        )
 
-    def generate_rebuttal_opinion(self, state: CaseState, *, opponent_claim: Optional[str] = None) -> DocumentResult:
+    def generate_rebuttal_opinion(
+        self,
+        state: CaseState,
+        *,
+        opponent_claim: Optional[str] = None,
+        report_sections: Optional[dict[str, str]] = None,
+        revision_request: Optional[str] = None,
+        previous_sections: Optional[dict[str, str]] = None,
+    ) -> DocumentResult:
         if opponent_claim:
             state.opponent_claim = opponent_claim
         package = self.build_package(state)
-        return generate_rebuttal_opinion(self.client, package, run_logger=self.run_logger, temperature=self.settings.agent.document_temperature)
+        if report_sections is None and state.incident_report is not None:
+            report_sections = state.incident_report.sections
+        return generate_rebuttal_opinion(
+            self.client, package, run_logger=self.run_logger, temperature=self.settings.agent.document_temperature,
+            report_sections=report_sections, revision_request=revision_request, previous_sections=previous_sections,
+        )

@@ -42,6 +42,8 @@ include = ["app*"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
+# 저장소 루트를 넣어 AI 구현체(../ai → `import ai.agent.real`)를 계약 테스트에서 바로 import 할 수 있게 한다.
+pythonpath = [".", ".."]
 
 [tool.ruff]
 line-length = 100

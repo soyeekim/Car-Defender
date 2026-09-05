@@ -298,6 +298,7 @@ class MatchedCaseSummary(BaseModel):
 
 class FaultAssessment(BaseModel):
     fault_ratio: FaultRatio
+    more_at_fault: Optional[Literal["user", "opponent", "equal"]] = Field(default=None, description="모델이 숫자보다 먼저 정한 책임 방향 (숫자와의 일관성 검사용)")
     assessment_type: Literal["estimated", "provisional"] = "estimated"
     most_likely: str = ""
     possible_range: Optional[list[str]] = None
@@ -329,6 +330,8 @@ class DocumentResult(BaseModel):
     title: str = ""
     sections: dict[str, str] = Field(default_factory=dict)
     text: str = ""
+    caveat: str = Field(default="", description="사건경위서: 확인되지 않아 본문에 쓰지 않은 사실을 사용자에게 알리는 한 문장")
+    mail_body: str = Field(default="", description="반박의견서: 보험사에 보내는 메일 본문(압축본)")
     cited_case_ids: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     grounding: GroundingReport = Field(default_factory=GroundingReport)

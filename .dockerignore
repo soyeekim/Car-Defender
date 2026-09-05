@@ -30,6 +30,12 @@
 
 # 런타임에 만들어지는 것 — 이미지에 넣지 않는다
 server/data/
+# AI 쪽 런타임 산출물·샘플 영상. RAG 인덱스(ai/data/rag_index/)는 judge 가 읽으므로 반드시 남긴다.
+ai/logs/
+ai/data/cache/
+ai/data/cases/
+ai/data/mp4/
+ai/data/eval/
 
 # 이미지 실행에 필요 없는 문서·자료
 server/docs/

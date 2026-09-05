@@ -466,20 +466,20 @@ def user_confirmation_question(result: VideoResult) -> str:
     if count < 2:
         # 상대 차량 자체를 식별하지 못한 경우: 어느 차량들이 충돌했는지 고르게 할 수 없다
         return (
-            "영상에서 충돌 상대 차량을 명확히 식별하지 못했습니다. "
-            "상대 차량이 어느 쪽(좌/우/앞/뒤)에서 어떤 차량(색상·차종)이었는지 알려주시면 그 정보로 영상을 다시 확인하겠습니다."
+            "영상에서 충돌한 상대 차량을 분명하게 찾지 못했어요. "
+            "상대 차량이 어느 쪽(좌/우/앞/뒤)에서 온 어떤 차량(색상·차종)이었는지 알려주시면 그 정보로 영상을 다시 확인할게요."
         )
-    lines = [f"영상에 차량이 {count}대 확인됩니다."]
+    lines = [f"영상에서 차량이 {count}대 보여요."]
     if len(participants) == 2:
         lines.append(
-            f"현재 분석에서는 {describe(participants[0])}과(와) {describe(participants[1])}이(가) 충돌한 것으로 보이나, "
-            f"충돌 순간 확신도가 낮습니다(신뢰도 {result.collision_pair.confidence:.2f})."
+            f"지금 분석으로는 {describe(participants[0])}과(와) {describe(participants[1])}이(가) 충돌한 것으로 보이지만, "
+            f"충돌 순간의 확신도가 낮아요(신뢰도 {result.collision_pair.confidence:.2f})."
         )
         lines.append(
             f"실제 충돌 차량이 {describe(participants[0])}과(와) {describe(participants[1])}이(가) 맞나요?"
         )
     else:
         options = ", ".join(f"{vehicle.id}({describe(vehicle.id)})" for vehicle in result.vehicles)
-        lines.append(f"어느 두 차량이 실제로 충돌했는지 영상만으로는 확정하기 어렵습니다. 차량 목록: {options}")
+        lines.append(f"어느 두 차량이 실제로 충돌했는지 영상만으로는 확정하기 어려워요. 차량 목록: {options}")
         lines.append("실제로 충돌한 두 차량이 어느 것인지 알려주실 수 있나요?")
     return " ".join(lines)

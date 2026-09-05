@@ -89,7 +89,7 @@ def deterministic_review_questions(
     primary = next((case for case in cases if case.relevance and case.relevance.usable_as_primary_reference), cases[0] if cases else None)
     summary = ""
     if primary:
-        summary = f"가장 유사한 사례는 {primary.case_id}({primary.ratio_summary()})입니다."
+        summary = f"가장 비슷한 사례는 {primary.case_id}({primary.ratio_summary()})예요."
         if primary.relevance and primary.relevance.different_factors:
             summary += " 현재 사건에서 아직 확인되지 않은 차이: " + ", ".join(primary.relevance.different_factors[:3]) + "."
     return summary, questions, rechecks

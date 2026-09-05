@@ -10,3 +10,7 @@ ai/data/
 ai/.env
 ai/logs/
 ai/.env.example
+design/
+ai/logs
+car_defender_ai_development_guide.md
+server/.env.example

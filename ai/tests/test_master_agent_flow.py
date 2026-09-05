@@ -94,7 +94,7 @@ def test_full_poc_scenario(tmp_path):
     assert state.fault_assessment is None
     assert response.data["similar_cases"][0]["case_id"] == "2018-070162"
     assert len(response.data["similar_cases"]) <= 3
-    assert "아직 과실비율을 판정하지 않았습니다" in response.message
+    assert "아직 과실비율을 판정하지 않았어요" in response.message
     # 실선/점선은 화면에 찍히는 것 → 사용자에게 묻지 않고, 2차 분석에서 이미 확인했으므로 대화 중 영상도 다시 부르지 않는다
     assert len(analyzer.calls) == video_calls
     assert "실선" not in "".join(q["question"] for q in response.data["questions"])
@@ -106,11 +106,12 @@ def test_full_poc_scenario(tmp_path):
     # 8. 답변 → Agent가 다음 질문을 하나 더 고름 → 답변 → 준비 완료 판단 후 종합 판정
     state, response = agent.chat(state, REVIEW_ANSWERS["other_vehicle.turn_signal"])
     assert response.action == "ASK_USER", response.message
-    assert "한 가지 더 확인" in response.message
+    assert "한 가지만 더 확인" in response.message
     assert response.data["questions"][0]["field"] == "ego_vehicle.entered_first"
     state, response = agent.chat(state, REVIEW_ANSWERS["ego_vehicle.entered_first"])
     assert response.action == "SHOW_FAULT_ASSESSMENT", response.message
-    assert "확인해 주신 내용과 유사 심의사례를 종합하여" in response.message
+    assert "확인해 주신 내용과 유사 심의사례를 종합해서" in response.message
+    assert "습니다" not in response.message  # 사용자에게 보이는 글은 해요체
     assert state.case_review_done
     assert state.other_vehicle.turn_signal.value == "false" and state.other_vehicle.turn_signal.source == "user"
     assert state.fault_assessment.fault_ratio.user == 30
@@ -394,7 +395,7 @@ def test_review_reasks_unanswered_then_concludes(tmp_path):
     state, response = agent.chat(state, "그날 비가 조금 왔어요.")
     assert response.action == "ASK_USER"
     assert response.data["questions"][0]["field"] == field
-    assert "다시 여쭤봅니다" in response.message
+    assert "다시 여쭤볼게요" in response.message
     # 모른다고 답함 → 다음 질문 또는 판정
     state, response = agent.chat(state, "잘 모르겠어")
     assert field in state.asked_fields
@@ -408,7 +409,7 @@ def test_unknown_answer_closes_question_immediately(tmp_path):
     state, response = agent.chat(state, "잘 모르겠어요.")
     assert field not in [q["field"] for q in response.data.get("questions", [])]
     assert any(field in item for item in state.uncertain_facts)
-    assert "다시 여쭤봅니다" not in response.message
+    assert "다시 여쭤볼게요" not in response.message
 
 
 def test_review_answers_user_question_and_keeps_pending(tmp_path):
@@ -416,7 +417,7 @@ def test_review_answers_user_question_and_keeps_pending(tmp_path):
     state, response = _reach_review(agent, tmp_path)
     state, response = agent.chat(state, "방향지시등이 뭐야? 어떻게 확인해야 하나요?")
     assert response.action == "ASK_USER"
-    assert "확인이 필요한 사항이 남아 있습니다" in response.message
+    assert "아직 확인이 필요한 게 남아 있어요" in response.message
     assert state.fault_assessment is None
     assert not state.case_review_done
 

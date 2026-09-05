@@ -203,3 +203,40 @@ E2E_BASE=http://localhost:8000 .venv/Scripts/python scripts/e2e_live.py 받을�
 ```
 
 여기까지 통과하면 배포에 올릴 수 있다.
+
+---
+
+## 실제 구현체 (AI 담당이 붙인 것)
+
+| 항목 | 값 |
+|---|---|
+| 클래스 | `ai/agent/real.py` → `AGENT_IMPL=ai.agent.real:RealAgent` |
+| 구조 | Master Accident Agent + Video Analysis Agent(Gemini) + Document Agent + 유사 심의사례 RAG Tool (`ai/README.md`) |
+| 상태 | 없음. Case State 전체를 `facts["_case_state"]` 로 왕복시킨다 (`ai/agent/codec.py`). 사람이 읽을 요약은 `facts["video_summary"]`, `key_facts`, `fault_ratio`, `opponent_claim` 등 최상위 키로도 넣는다. |
+| `analyze` | 영상 1차 분석 → Agent가 부족한 점을 추론해 2차 분석 → 사용자 설명에서 사실 추출 → 첫 질문 1개 (`questions[0]`). 물을 것이 없으면 유사 심의사례까지 `summary_text` 에 넣고 `questions: []` → 바로 판정. |
+| `chat` | 한 턴에 질문 하나. 사실 수집 → 유사 심의사례 제시·검토 → 준비되면 `next_action: verdict`(재판정이면 `rejudge`), 문서 요청은 `create_report`/`create_rebuttal`. 대화 중에는 영상을 다시 부르지 않는다(사용자가 명시 요청할 때만). |
+| `judge` | 검색된 심의사례(없으면 검색) + 사실을 종합해 판정. 가장 유사한 사례의 결정비율을 기준값으로 삼고 확인된 수정요소가 있을 때만 벗어난다. `basis.precedents[].body_text` 를 채운다. 판정 상세는 `/tmp/car_defender_agent/` 에 남겨 다음 호출이 되살린다(없으면 판정 스냅샷으로 복원). |
+| `write` | report: 명세서 3.1의 4개 섹션 + `caveat` + `page_count`; rebuttal: 메일 본문(`body`, 5000자 이내). `revision_request`/`previous_sections`/`report_sections` 반영. |
+| 필요 환경변수 | `OPENAI_API_KEY`, `GEMINI_API_KEY` (+ 선택: `GEMINI_VIDEO_MODEL`, `MASTER_AGENT_MODEL`, `DOCUMENT_AGENT_MODEL`, `RAG_INDEX_DIR`, `CAR_DEFENDER_AGENT_TMP`). 전체 목록은 `ai/.env.example`. |
+| 필요 데이터 | RAG 인덱스 `ai/data/rag_index/` (`cd ai && python build_rag_index.py`). 이미지에 `ai/data` 가 들어가므로 **빌드 전에 인덱스를 만들어 둔다**(또는 볼륨으로 마운트하고 `RAG_INDEX_DIR` 지정). |
+| 소요 시간(실측) | analyze 60~120초(영상 2회 분석), chat 10~40초, judge 20~60초, write 15~40초. 모두 `JOB_TIMEOUT_SECONDS=300` 안. |
+
+로컬 실행 (저장소 루트가 import 경로에 있어야 `ai.agent.real` 을 찾는다):
+
+```bash
+cd server
+AGENT_IMPL=ai.agent.real:RealAgent PYTHONPATH=.. .venv/bin/python -m uvicorn app.main:app --port 8000
+# 계약 테스트 (pytest 는 pyproject 의 pythonpath 설정으로 PYTHONPATH 없이도 된다)
+AGENT_CONTRACT_IMPL=ai.agent.real:RealAgent AGENT_CONTRACT_VIDEO=../ai/data/mp4/bb_1_220804_vehicle_116_067.mp4 \
+  .venv/bin/python -m pytest tests/test_agent_contract.py -v
+```
+
+프론트 없이 챗봇을 써 보려면 (서버를 띄운 채 다른 터미널에서):
+
+```bash
+cd server
+.venv/bin/python scripts/chat_cli.py --video ../ai/data/mp4/bb_1_220804_vehicle_116_067.mp4
+# 가입 → 사건 생성 → 설명 입력 → 영상 업로드 → 질문에 답하며 판정·경위서·반박의견서까지. /help 로 명령어 확인.
+```
+
+`ai/agent/` 는 이 계약 어댑터이고, `ai/agents/` 는 3-Agent 구현이다. 어댑터 단위 테스트는 `cd ai && python -m pytest tests/test_server_adapter.py` (네트워크 없이 Fake 로 돈다).
