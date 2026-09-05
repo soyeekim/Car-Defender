@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import inspect
+import logging
 
 from pydantic import BaseModel
 
@@ -33,6 +34,8 @@ def load_agent_class(path: str) -> type:
         raise ImportError(f"AGENT_IMPL 클래스를 찾을 수 없어요: {path}")
     return cls
 
+
+log = logging.getLogger(__name__)
 
 _RESULT_TYPES = {"analyze": AnalyzeResult, "chat": ChatResult, "judge": JudgeResult, "write": WriteResult, "explain": ExplainResult}
 
@@ -86,8 +89,12 @@ _agent: Agent | None = None
 def get_agent() -> Agent:
     global _agent
     if _agent is None:
-        cls = load_agent_class(get_settings().agent_impl)
+        path = get_settings().agent_impl
+        cls = load_agent_class(path)
         _agent = AgentAdapter(cls())
+        # 기동 로그에서 어떤 구현체가 붙었는지 바로 보이게 한다 (.env 의 Mock 이 명령줄 환경변수로 덮였는지 확인용)
+        kind = "MOCK (정해진 시나리오로 답함)" if path == "app.agent.mock:MockAgent" else "REAL"
+        log.info("agent impl: %s → %s.%s [%s]", path, cls.__module__, cls.__name__, kind)
     return _agent
 
 

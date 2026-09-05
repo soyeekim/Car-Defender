@@ -76,3 +76,12 @@ def generate_opaque_token() -> str:
 
 def hash_token(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def create_precedent_image_token(precedent_id: str) -> str:
+    """심의사례 그림은 <img src> 로 열려 Authorization 헤더를 못 붙인다 → 영상 스트림처럼 URL 에 서명을 싣는다."""
+    return _encode({"pid": precedent_id, "type": "precedent_image"}, get_settings().stream_token_minutes)
+
+
+def decode_precedent_image_token(token: str) -> str:
+    return _decode(token, "precedent_image")["pid"]

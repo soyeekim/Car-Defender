@@ -98,6 +98,18 @@ Vercel Settings → Domains 에서 `fairway.click` 을 붙이고 나면 끝난�
 
 ## 붙일 때 지켜야 하는 것
 
+### AI 말풍선의 줄바꿈은 살린다
+
+채팅 메시지의 `payload.text` 에는 서버가 넣어 준 줄바꿈(`\n`)이 들어 있다. 문장마다 한 줄, 심의사례 목록은
+항목마다 한 줄, 문단 사이는 빈 줄이다. 그대로 `<p>` 에 넣으면 브라우저가 전부 한 줄로 붙이므로
+**말풍선 글자 요소(`AiText`)에 `whitespace-pre-line` 을 붙인다.** 그것만으로 문장·항목이 줄로 나뉜다.
+
+```tsx
+<p className="whitespace-pre-line text-[15px] leading-[1.6] text-ink">{children}</p>
+```
+
+`pre-line` 은 줄바꿈만 살리고 연속 공백은 접으므로 글자 간격은 그대로다. 질문 카드·판정 카드 요약(`summary`)도 같다.
+
 ### 모든 요청에 `credentials: 'include'`
 
 이게 빠지면 로그인 자체는 되는데 refresh 쿠키가 저장되지도, 전송되지도 않는다.
@@ -164,6 +176,11 @@ mp4v·HEVC 이거나 `.mov`·`.avi` 면, 업로드를 처리하는 동안 서버
 변환이 실패하거나(손상된 파일 등) 시간을 넘기면 원본이 그대로 나간다. 이때만
 `<video>` 가 못 읽을 수 있으니, "이 영상은 브라우저에서 미리 볼 수 없어요 —
 분석에는 문제가 없어요" 같은 안내를 그물로 깔아 두면 된다.
+
+### 심의사례 팝업 그림도 받은 URL 을 그대로 쓴다
+
+`GET /precedents/{id}` 응답의 `imageUrl` 은 영상과 같은 서명 URL 이다. `<img src={API_BASE_ORIGIN + imageUrl} />` 로 넣고
+헤더는 붙이지 않는다. `null` 이면 글만 보여 준다. 자세한 것은 `precedent-image-spec.md`.
 
 ### 에러는 화면에 그대로 쓸 수 있게 온다
 

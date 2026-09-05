@@ -20,6 +20,7 @@ from app.api import (
     verdict,
     videos,
 )
+from app.agent.loader import get_agent
 from app.config import get_settings
 from app.errors import register_error_handlers
 from app.jobs.runner import runner
@@ -46,6 +47,12 @@ async def lifespan(app: FastAPI):
             log.info("발송 중 멈춰 있던 반박의견서 %d건을 draft로 되돌렸어요", reset_n)
     # 등록된 next_action 처리기를 남긴다: 문서 생성·반박 액션이 붙었는지 기동 로그로 확인한다.
     log.info("등록된 액션: %s", ", ".join(actions.registered()) or "(없음)")
+    # Agent 구현체를 기동 때 미리 불러 둔다: 기동 로그에 Mock 인지 실제 AI 인지 찍힌다 (app.agent.loader).
+    # 불러오지 못해도 기동은 계속한다 — /health 가 degraded 로 알리는 기존 동작을 유지한다.
+    try:
+        get_agent()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Agent 구현체를 불러오지 못했어요 (%s). /health 가 degraded 로 표시돼요", exc)
     yield
     await chat.wait_all(timeout=settings.shutdown_wait_seconds)
     await runner.wait_all(timeout=settings.shutdown_wait_seconds)

@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     ffprobe_bin: str = "ffprobe"
     ffmpeg_bin: str = "ffmpeg"
     transcode_timeout_seconds: int = 60  # 재생본 변환이 이보다 오래 걸리면 포기하고 원본을 쓴다
+    # 심의사례·인정기준 도표 그림(PNG) 폴더. AI 쪽 `python build_case_images.py` 가 만든 manifest.json 이 있는 곳.
+    # 비우면 RAG_INDEX_DIR/images → /srv/ai/data/rag_index/images(Docker) → ../ai/data/rag_index/images(로컬) 순서로 찾는다.
+    precedent_image_dir: str | None = None
 
     @property
     def cors_origin_list(self) -> list[str]:
