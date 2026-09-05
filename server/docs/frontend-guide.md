@@ -163,6 +163,9 @@ const es = new EventSource(
 붙이지 않는다 (video 태그는 헤더를 못 보낸다). **유효 기간이 10분**이라 오래 열어 두는
 화면이면 만료 시 영상 정보를 다시 받아 URL을 갱신한다.
 
+영상 응답의 `meta.speedKph`·`meta.impactAtSec` 는 **AI 영상 분석의 추정치**다(`meta.estimated: true`).
+`durationSec`·`recordedAt` 처럼 파일에서 읽은 값이 아니니, 화면에는 "약 48km/h" 같이 추정임이 드러나는 표기를 쓴다.
+
 #### 브라우저가 못 여는 형식은 서버가 바꿔서 보낸다
 
 `streamUrl` 로는 **언제나 브라우저가 읽을 수 있는 바이트가 흐른다.** 올라온 파일이

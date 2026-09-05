@@ -161,7 +161,8 @@ def attachment_payload(video: Video) -> dict:
         "durationSec": video.duration_sec,
         "sizeLabel": size_label(video.size_bytes),
         "recordedAt": to_kst_iso(video.recorded_at),
-        "meta": {"speedKph": meta.get("speedKph"), "impactAtSec": meta.get("impactAtSec")} if meta else None,
+        # speedKph·impactAtSec 는 AI 영상 분석의 추정치다. durationSec·recordedAt(파일 실측)과 구분되게 표시한다.
+        "meta": {"speedKph": meta.get("speedKph"), "impactAtSec": meta.get("impactAtSec"), "estimated": True} if meta else None,
     }
 
 
@@ -271,6 +272,7 @@ def video_detail(video: Video) -> dict:
             "speedKph": meta.get("speedKph"),
             "impactAtSec": meta.get("impactAtSec"),
             "impactLabel": impact_label(meta.get("impactAtSec")),
+            "estimated": True,  # AI 영상 분석 추정치 — durationSec·recordedAt 같은 파일 실측값과 구분한다
         } if meta else None,
         "streamUrl": f"/api/v1/videos/{video.id}/stream?t={create_stream_token(video.id)}",
         "notice": VIDEO_NOTICE,
