@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     smtp_starttls: bool = True
     mail_from: str = "no-reply@fairway.click"
     ffprobe_bin: str = "ffprobe"
+    ffmpeg_bin: str = "ffmpeg"
+    transcode_timeout_seconds: int = 60  # 재생본 변환이 이보다 오래 걸리면 포기하고 원본을 쓴다
 
     @property
     def cors_origin_list(self) -> list[str]:
