@@ -19,4 +19,6 @@ class Video(Base):
     recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     meta: Mapped[dict | None] = mapped_column(MutableDict.as_mutable(JSON))
     storage_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 브라우저가 원본을 못 열 때만 채워지는 재생용 H.264 사본. 분석은 언제나 storage_key 를 쓴다.
+    playback_key: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

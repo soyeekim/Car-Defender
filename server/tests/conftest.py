@@ -131,9 +131,18 @@ async def case_id(client, auth_headers):
 
 @pytest.fixture(autouse=True)
 def fake_probe(monkeypatch):
+    """기본은 이미 브라우저가 읽는 파일 — 재생본 변환 없이 지나간다."""
     from app.services import video as video_service
 
-    monkeypatch.setattr(video_service, "probe_video", lambda path: (42, datetime(2026, 8, 22, 14, 2, 17, tzinfo=KST)))
+    probe = video_service.Probe(
+        duration_sec=42,
+        recorded_at=datetime(2026, 8, 22, 14, 2, 17, tzinfo=KST),
+        video_codec="h264",
+        audio_codec="aac",
+        format_names=frozenset({"mov", "mp4", "m4a"}),
+        major_brand="isom",
+    )
+    monkeypatch.setattr(video_service, "probe_video", lambda path: probe)
 
 
 @pytest.fixture

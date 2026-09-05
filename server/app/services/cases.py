@@ -101,7 +101,7 @@ async def delete_case(db: AsyncSession, case: Case) -> None:
     keys: list[str] = []
     video = await get_video(db, case_id)
     if video is not None:
-        keys.append(video.storage_key)
+        keys.extend(k for k in (video.storage_key, video.playback_key) if k)
     for report in (await db.execute(select(Report).where(Report.case_id == case_id))).scalars().all():
         pdf = (await db.execute(select(ReportPdf).where(ReportPdf.report_id == report.id))).scalar_one_or_none()
         if pdf is not None:

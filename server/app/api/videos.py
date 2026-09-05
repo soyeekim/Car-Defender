@@ -54,9 +54,13 @@ async def stream(video_id: str, request: Request, t: str = Query(...)):
         video = await db.get(Video, video_id)
         if video is None:
             raise ApiError("NOT_FOUND")
-        key = video.storage_key
-        # 클라이언트가 업로드 때 준 Content-Type을 그대로 되돌려주지 않는다.
-        media_type = video.mime_type if video.mime_type in video_service.EXT_BY_MIME else "video/mp4"
+        # 재생본이 있으면 그쪽을 흘린다. 원본(storage_key)은 분석용으로 그대로 둔다.
+        key = video.playback_key or video.storage_key
+        # 클라이언트가 업로드 때 준 Content-Type을 그대로 되돌려주지 않는다. 실제 보내는 바이트에 맞춘다.
+        if video.playback_key:
+            media_type = "video/mp4"
+        else:
+            media_type = video.mime_type if video.mime_type in video_service.EXT_BY_MIME else "video/mp4"
     storage = get_storage()
     try:
         size = await storage.size(key)
