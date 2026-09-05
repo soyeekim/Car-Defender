@@ -149,6 +149,21 @@ async def draft_card(db: AsyncSession, case_id: str) -> Message | None:
     return (await db.execute(stmt)).scalars().first()
 
 
+async def sync_draft_card(db: AsyncSession, rebuttal: Rebuttal) -> None:
+    """카드(rebuttal_draft)를 초안의 현재 값에 맞춘다.
+
+    수신자·접수번호·제목·본문·첨부 포함 여부를 다이얼로그(G-3)에서 고치면 G-2 응답은 live 지만,
+    카드는 Job이 만든 시점의 스냅샷이라 "아직 안 정했어요 · canSend false"로 남는다(경위서 pageCount와 같은 패턴).
+    """
+    card = await draft_card(db, rebuttal.case_id)
+    if card is None or card.payload.get("rebuttalId") != rebuttal.id:
+        return
+    payload = draft_payload(rebuttal, await resolve_attachments(db, rebuttal))
+    if card.payload == payload:
+        return
+    await case_service.update_message(db, card, payload)
+
+
 async def apply_patch(db: AsyncSession, rebuttal: Rebuttal, patch: RebuttalPatch) -> Rebuttal:
     if rebuttal.status in ALREADY_SENT_STATUSES:
         raise ApiError("REBUTTAL_ALREADY_SENT")
@@ -177,6 +192,7 @@ async def apply_patch(db: AsyncSession, rebuttal: Rebuttal, patch: RebuttalPatch
         rebuttal.subject = auto_subject(rebuttal.claim_number)[:200]
     rebuttal.updated_at = now_utc()
     await db.commit()
+    await sync_draft_card(db, rebuttal)
     return rebuttal
 
 
