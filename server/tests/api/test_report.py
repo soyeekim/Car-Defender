@@ -203,3 +203,17 @@ async def test_pdf_download_url_opens_without_auth_header(client, auth_headers, 
     await client.post(f"/cases/{judged_case}/report/versions/2/pdf", headers=auth_headers)
     token_v1 = url.split("t=", 1)[1]
     assert (await client.get(f"/cases/{judged_case}/report/versions/2/pdf?t={token_v1}")).status_code == 403
+
+
+async def test_pdf_render_corrects_page_count_on_draft_card_too(client, auth_headers, judged_case, settle):
+    # 경위서 생성 시 page_count는 Agent의 추정치다(mock은 2). PDF를 실제로 렌더링하면 ensure_pdf가
+    # reports.page_count를 실제 페이지 수로 덮어쓰는데, 카드(report_draft 메시지)의 payload.pageCount는
+    # 그대로 남아 "카드는 2장, 전문은 1장"으로 갈렸다(실서버 제보). 카드도 같이 맞춰야 한다.
+    await client.post(f"/cases/{judged_case}/report", headers=auth_headers)
+    await settle()
+    await client.post(f"/cases/{judged_case}/report/versions/1/pdf", headers=auth_headers)
+
+    full = (await client.get(f"/cases/{judged_case}/report/versions/1", headers=auth_headers)).json()
+    msgs = (await client.get(f"/cases/{judged_case}/messages", headers=auth_headers)).json()["items"]
+    card = next(m for m in msgs if m["type"] == "report_draft")
+    assert card["payload"]["pageCount"] == full["pageCount"], (card["payload"]["pageCount"], full["pageCount"])
