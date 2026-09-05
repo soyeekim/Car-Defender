@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     access_token_minutes: int = 30
     refresh_token_days: int = 14
     stream_token_minutes: int = 10
+    download_token_minutes: int = 60  # PDF downloadUrl 에 담기는 단기 토큰. 한 문서만 읽을 수 있다
     cors_origins: str = "http://localhost:5173"
     front_base_url: str = "http://localhost:5173"
     agent_impl: str = "app.agent.mock:MockAgent"
@@ -32,6 +33,7 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_starttls: bool = True
     mail_from: str = "no-reply@fairway.click"
+    smtp_timeout_seconds: int = 120  # 25MB 첨부는 base64 후 33MB, 업로드에 1분 가까이 걸린다(실측 51.7초)
     ffprobe_bin: str = "ffprobe"
     ffmpeg_bin: str = "ffmpeg"
     transcode_timeout_seconds: int = 60  # 재생본 변환이 이보다 오래 걸리면 포기하고 원본을 쓴다

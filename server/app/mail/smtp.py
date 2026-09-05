@@ -41,7 +41,7 @@ class SmtpMailer:
                 username=self.s.smtp_user or None,
                 password=self.s.smtp_password or None,
                 start_tls=self.s.smtp_starttls,
-                timeout=30,
+                timeout=self.s.smtp_timeout_seconds,
             )
         except (aiosmtplib.SMTPException, OSError) as e:
             raise MailSendError(str(e)) from e

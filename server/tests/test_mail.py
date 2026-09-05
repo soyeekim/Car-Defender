@@ -68,3 +68,17 @@ async def test_smtp_mailer_wraps_smtp_exception(monkeypatch):
     msg = MailMessage(to="kim@insu.co.kr", subject="s", body_text="본문")
     with pytest.raises(MailSendError):
         await mailer.send(msg)
+
+
+async def test_smtp_mailer_uses_configured_timeout(monkeypatch):
+    # 25MB 첨부는 base64 후 33MB가 되어 업로드에 1분 가까이 걸린다. 30초 고정값은 실제 크기의
+    # 블랙박스 영상 첨부를 항상 실패시켰다(실측: 30초 실패, 실소요 51.7초). 값은 설정에서 와야 한다.
+    captured = {}
+
+    async def fake_send(em, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(aiosmtplib, "send", fake_send)
+    settings = Settings(mail_from="no-reply@fairway.click", smtp_host="smtp.example.com", smtp_timeout_seconds=777)
+    await SmtpMailer(settings).send(MailMessage(to="kim@insu.co.kr", subject="s", body_text="본문"))
+    assert captured["timeout"] == 777
