@@ -1,0 +1,26 @@
+{
+  "prompt_versions": {
+    "video_system": "v3",
+    "video_full_analysis": "v2",
+    "video_focus_analysis": "v2",
+    "video_signal_focus": "v1",
+    "video_collision_focus": "v1",
+    "video_lane_focus": "v1",
+    "video_gpt_frames_full": "v1",
+    "video_tracking_context": "v1",
+    "master_system": "v1",
+    "master_intent": "v1",
+    "master_fact_extraction": "v2",
+    "master_sufficiency": "v1",
+    "master_followup_question": "v5",
+    "master_case_review_questions": "v3",
+    "master_video_gap_plan": "v1",
+    "master_rag_query": "v1",
+    "master_case_validation": "v1",
+    "master_fault_assessment": "v2",
+    "master_respond": "v1",
+    "document_system": "v1",
+    "document_incident_report": "v1",
+    "document_rebuttal_opinion": "v1"
+  }
+}

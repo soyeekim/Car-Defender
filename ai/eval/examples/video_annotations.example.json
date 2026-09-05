@@ -1,0 +1,35 @@
+{
+  "items": [
+    {
+      "video_id": "accident_001",
+      "video_path": "data/mp4/bb_1_220804_vehicle_116_067.mp4",
+      "description": "회전교차로에서 주행 중 옆 차량과 충돌",
+      "ground_truth": {
+        "vehicle_count": 2,
+        "collision_pair": ["vehicle_1", "vehicle_2"],
+        "non_participants": [],
+        "collision_timestamp_sec": 5.8,
+        "road_type": "roundabout",
+        "signal_present": false,
+        "ego_direction": "inside_roundabout",
+        "other_direction": "right_entry",
+        "collision": "ego_front-other_left_side",
+        "ego_entered_first": true,
+        "fault_relevant_facts": ["회전교차로", "진입"]
+      }
+    },
+    {
+      "video_id": "accident_002",
+      "video_path": "data/mp4/cc_3_200203_vehicle_311_029.mp4",
+      "description": "교차로에서 직진 중 측면에서 진입한 차량과 충돌",
+      "ground_truth": {
+        "vehicle_count": 3,
+        "collision_pair": ["vehicle_1", "vehicle_3"],
+        "non_participants": ["vehicle_2"],
+        "collision_timestamp_sec": null,
+        "road_type": "intersection",
+        "signal_present": null
+      }
+    }
+  ]
+}
