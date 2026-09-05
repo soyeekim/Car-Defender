@@ -48,13 +48,11 @@ async def test_send_success_flow(client, auth_headers, reported_case, settle, ss
     assert sent.attachments[0].content[:4] == b"%PDF"
     assert "이 메일은 Fairway(fairway.click)를 통해 hyun@example.com 님이 보냈습니다." in sent.body_text
 
-    frames = await tap.take(4)
-    # 발송하면서 PDF를 처음 만들 때 page_count가 실제 페이지 수(1)로 보정되고, 카드(report_draft)도 같이
-    # 갱신돼 message.updated가 먼저 온다. 안 그러면 카드 2장·전문 1장으로 갈린다(실서버 제보).
-    assert "event: message.updated" in frames[0] and '"type": "report_draft"' in frames[0] and '"pageCount": 1' in frames[0]
-    assert '"type": "sent"' in frames[1] and '"attachmentCount": 2' in frames[1] and '"nextSteps"' in frames[1]
-    assert "event: rebuttal.sent" in frames[2]
-    assert '"status": "sent"' in frames[3] and '"rebuttal": {"exists": true, "locked": false, "label": "발송 완료 · ' in frames[3]
+    # PDF 는 경위서 생성 때 이미 실측 page_count 로 만들어져 있어, 발송 시 보정·카드 갱신 이벤트는 없다
+    frames = await tap.take(3)
+    assert '"type": "sent"' in frames[0] and '"attachmentCount": 2' in frames[0] and '"nextSteps"' in frames[0]
+    assert "event: rebuttal.sent" in frames[1]
+    assert '"status": "sent"' in frames[2] and '"rebuttal": {"exists": true, "locked": false, "label": "발송 완료 · ' in frames[2]
 
     detail = (await client.get(f"/cases/{reported_case}", headers=auth_headers)).json()
     assert detail["stages"]["rebuttal"] == {"state": "done"}
