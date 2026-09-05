@@ -70,6 +70,14 @@ def decode_stream_token(token: str) -> str:
     return _decode(token, "stream")["vid"]
 
 
+def create_download_token(report_id: str) -> str:
+    return _encode({"rid": report_id, "type": "download"}, get_settings().download_token_minutes)
+
+
+def decode_download_token(token: str) -> str:
+    return _decode(token, "download")["rid"]
+
+
 def generate_opaque_token() -> str:
     return secrets.token_urlsafe(32)
 

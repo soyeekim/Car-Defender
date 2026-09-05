@@ -64,7 +64,7 @@ async def test_pdf_create_idempotent_and_download(client, auth_headers, judged_c
     assert res.status_code == 201
     body = res.json()
     assert body["filename"].startswith("사건경위서_교차로 직진 충돌 · 08-22_") and body["sizeBytes"] > 1000
-    assert body["downloadUrl"] == f"/api/v1/cases/{judged_case}/report/versions/1/pdf"
+    assert body["downloadUrl"].startswith(f"/api/v1/cases/{judged_case}/report/versions/1/pdf?t=")
 
     again = await client.post(f"/cases/{judged_case}/report/versions/1/pdf", headers=auth_headers)
     assert again.status_code == 200 and again.json()["pdfId"] == body["pdfId"]
@@ -181,3 +181,25 @@ async def test_pdf_rendering_runs_off_the_event_loop(client, auth_headers, judge
     res = await client.post(f"/cases/{judged_case}/report/versions/1/pdf", headers=auth_headers)
     assert res.status_code == 201, res.text
     assert seen["off_main_thread"] is True
+
+
+async def test_pdf_download_url_opens_without_auth_header(client, auth_headers, judged_case, settle):
+    # 브라우저는 <a href>/window.open 으로 PDF를 여는데 그 요청에는 Authorization 헤더를 실을 수 없다.
+    # 헤더 없이 치면 401 JSON이 내려가고 크롬은 "PDF 문서를 로드하지 못했습니다"를 띄운다(실서버 재현).
+    # 영상 스트림(?t=)과 같은 방식으로 downloadUrl 자체에 단기 토큰을 넣어 헤더 없이 열리게 한다.
+    await client.post(f"/cases/{judged_case}/report", headers=auth_headers)
+    await settle()
+    url = (await client.post(f"/cases/{judged_case}/report/versions/1/pdf", headers=auth_headers)).json()["downloadUrl"]
+    assert url.startswith(f"/api/v1/cases/{judged_case}/report/versions/1/pdf?t=")
+
+    dl = await client.get(url.removeprefix("/api/v1"))  # 인증 헤더 없음
+    assert dl.status_code == 200 and dl.headers["content-type"] == "application/pdf"
+    assert dl.content[:4] == b"%PDF"
+
+    # 깨진 토큰은 401, 다른 버전의 PDF에는 쓸 수 없다(403)
+    assert (await client.get(f"/cases/{judged_case}/report/versions/1/pdf?t=broken")).status_code == 401
+    await client.post(f"/cases/{judged_case}/report/revisions", json={"request": "짧게"}, headers=auth_headers)
+    await settle()
+    await client.post(f"/cases/{judged_case}/report/versions/2/pdf", headers=auth_headers)
+    token_v1 = url.split("t=", 1)[1]
+    assert (await client.get(f"/cases/{judged_case}/report/versions/2/pdf?t={token_v1}")).status_code == 403

@@ -10,6 +10,7 @@ from app.errors import ApiError
 from app.ids import new_id
 from app.models import Case, Job, Message, Report, ReportPdf
 from app.pdf.report_pdf import render_report_pdf, report_pdf_filename
+from app.security import create_download_token
 from app.services import cases as case_service
 from app.services.actions import register_action
 from app.services.presenters import ordinal_label
@@ -140,7 +141,10 @@ async def ensure_pdf(db: AsyncSession, case: Case, report: Report) -> tuple[Repo
 def pdf_response_dict(case: Case, report: Report, pdf: ReportPdf) -> dict:
     return {
         "pdfId": pdf.id, "version": report.version, "filename": pdf.filename, "sizeBytes": pdf.size_bytes,
-        "downloadUrl": f"/api/v1/cases/{case.id}/report/versions/{report.version}/pdf", "createdAt": to_kst_iso(pdf.created_at),
+        # 브라우저는 <a href>/window.open 으로 이 URL을 여는데 그 요청엔 Authorization 헤더가 실리지 않는다.
+        # 영상 streamUrl(?t=)과 같은 방식으로 단기 토큰을 URL에 담아 헤더 없이도 열리게 한다.
+        "downloadUrl": f"/api/v1/cases/{case.id}/report/versions/{report.version}/pdf?t={create_download_token(report.id)}",
+        "createdAt": to_kst_iso(pdf.created_at),
     }
 
 
