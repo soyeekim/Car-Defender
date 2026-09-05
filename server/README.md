@@ -52,8 +52,9 @@ t3.micro처럼 메모리 1GB인 인스턴스에서는 빌드가 무겁다(`pip i
 196MB). 빌드는 개발 PC에서 하고 서버는 받아서 실행만 한다.
 
 ```bash
-# 개발 PC
-docker build -t <계정>/fairway-app:v1 .
+# 개발 PC — 저장소 루트에서 실행한다 (server/ 와 ai/ 를 한 이미지에 담으므로 컨텍스트는 루트)
+cd ..
+docker build -f server/Dockerfile -t <계정>/fairway-app:v1 .
 docker push <계정>/fairway-app:v1
 
 # EC2 (.env에 APP_IMAGE=<계정>/fairway-app:v1 를 추가한 뒤)
