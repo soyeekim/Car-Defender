@@ -151,6 +151,18 @@ const es = new EventSource(
 연결이 끊겼다 붙으면 브라우저가 `Last-Event-ID` 를 자동으로 보내고, 서버가 최근 5분치를
 다시 흘려준다. 놓친 이벤트를 따로 챙길 필요는 없다.
 
+#### 이벤트별로 할 일
+
+| 이벤트 | 언제 오나 | 프론트가 할 일 |
+|---|---|---|
+| `message.created` | 카드가 새로 붙을 때 | 채팅 목록 끝에 추가 |
+| `message.updated` | **기존 카드의 내용이 바뀔 때** — 경위서 **다시 쓰기**가 끝나면 `report_draft` 카드가 새 `version`으로 이 이벤트로 온다 (카드가 새로 생기지 않는다) | 같은 `id`의 카드를 교체. **전문 화면이 열려 있으면 `GET /cases/{caseId}/report/versions/latest` 를 다시 받아 그린다** |
+| `case.updated` | 상태·문서 요약이 바뀔 때 | 상단 상태, `documents.report.version` 갱신 |
+| `rebuttal.sent` | 발송 성공 | 발송 완료 화면 |
+
+전문 화면은 열 때 한 번 받은 스냅샷이다. 다시 쓰기 결과는 `message.updated` 로만 알려 주니,
+이걸 안 받으면 사용자가 창을 닫고 다시 열기 전까지 옛 내용이 그대로 보인다.
+
 ### 영상 재생은 받은 URL을 그대로 쓴다
 
 영상 조회 응답의 `streamUrl` 은 이미 서명이 붙어 있다.
@@ -162,6 +174,9 @@ const es = new EventSource(
 `<video src={API_BASE_ORIGIN + streamUrl} />` 로 그냥 넣으면 된다. `Authorization` 헤더를
 붙이지 않는다 (video 태그는 헤더를 못 보낸다). **유효 기간이 10분**이라 오래 열어 두는
 화면이면 만료 시 영상 정보를 다시 받아 URL을 갱신한다.
+
+영상 응답의 `meta.speedKph`·`meta.impactAtSec` 는 **AI 영상 분석의 추정치**다(`meta.estimated: true`).
+`durationSec`·`recordedAt` 처럼 파일에서 읽은 값이 아니니, 화면에는 "약 48km/h" 같이 추정임이 드러나는 표기를 쓴다.
 
 #### 브라우저가 못 여는 형식은 서버가 바꿔서 보낸다
 
@@ -231,5 +246,7 @@ VITE_API_BASE=https://api.fairway.click/api/v1
 | 로그인은 되는데 새로고침하면 풀림 | `credentials: 'include'` 가 빠졌다 |
 | 30분마다 로그아웃 (Vercel 임시 도메인) | 정상이다. 위 2번 참고 |
 | SSE가 401 | 토큰을 쿼리(`?access_token=`)로 안 넘겼다 |
+| PDF 열면 "PDF 문서를 로드하지 못했습니다" | `downloadUrl` 의 `?t=` 를 떼고 열었거나, `API_BASE_ORIGIN` 을 안 붙여 Vercel로 갔다. 받은 파일을 메모장으로 열어 보면 JSON(401)인지 HTML(404)인지 보인다 |
+| 다시 쓰기 후 전문 화면이 안 바뀜 | `message.updated` 를 안 받는다. 위 이벤트 표 참고 |
 | 영상이 갑자기 안 나옴 | `streamUrl` 이 10분 지나 만료됐다. 다시 받는다 |
 | 로컬에서 502 | 컨테이너가 아직 뜨는 중이다. `docker compose logs -f app` 로 본다 |

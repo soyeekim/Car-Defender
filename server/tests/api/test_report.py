@@ -64,7 +64,7 @@ async def test_pdf_create_idempotent_and_download(client, auth_headers, judged_c
     assert res.status_code == 201
     body = res.json()
     assert body["filename"].startswith("사건경위서_교차로 직진 충돌 · 08-22_") and body["sizeBytes"] > 1000
-    assert body["downloadUrl"] == f"/api/v1/cases/{judged_case}/report/versions/1/pdf"
+    assert body["downloadUrl"].startswith(f"/api/v1/cases/{judged_case}/report/versions/1/pdf?t=")
 
     again = await client.post(f"/cases/{judged_case}/report/versions/1/pdf", headers=auth_headers)
     assert again.status_code == 200 and again.json()["pdfId"] == body["pdfId"]
@@ -181,3 +181,39 @@ async def test_pdf_rendering_runs_off_the_event_loop(client, auth_headers, judge
     res = await client.post(f"/cases/{judged_case}/report/versions/1/pdf", headers=auth_headers)
     assert res.status_code == 201, res.text
     assert seen["off_main_thread"] is True
+
+
+async def test_pdf_download_url_opens_without_auth_header(client, auth_headers, judged_case, settle):
+    # 브라우저는 <a href>/window.open 으로 PDF를 여는데 그 요청에는 Authorization 헤더를 실을 수 없다.
+    # 헤더 없이 치면 401 JSON이 내려가고 크롬은 "PDF 문서를 로드하지 못했습니다"를 띄운다(실서버 재현).
+    # 영상 스트림(?t=)과 같은 방식으로 downloadUrl 자체에 단기 토큰을 넣어 헤더 없이 열리게 한다.
+    await client.post(f"/cases/{judged_case}/report", headers=auth_headers)
+    await settle()
+    url = (await client.post(f"/cases/{judged_case}/report/versions/1/pdf", headers=auth_headers)).json()["downloadUrl"]
+    assert url.startswith(f"/api/v1/cases/{judged_case}/report/versions/1/pdf?t=")
+
+    dl = await client.get(url.removeprefix("/api/v1"))  # 인증 헤더 없음
+    assert dl.status_code == 200 and dl.headers["content-type"] == "application/pdf"
+    assert dl.content[:4] == b"%PDF"
+
+    # 깨진 토큰은 401, 다른 버전의 PDF에는 쓸 수 없다(403)
+    assert (await client.get(f"/cases/{judged_case}/report/versions/1/pdf?t=broken")).status_code == 401
+    await client.post(f"/cases/{judged_case}/report/revisions", json={"request": "짧게"}, headers=auth_headers)
+    await settle()
+    await client.post(f"/cases/{judged_case}/report/versions/2/pdf", headers=auth_headers)
+    token_v1 = url.split("t=", 1)[1]
+    assert (await client.get(f"/cases/{judged_case}/report/versions/2/pdf?t={token_v1}")).status_code == 403
+
+
+async def test_pdf_render_corrects_page_count_on_draft_card_too(client, auth_headers, judged_case, settle):
+    # 경위서 생성 시 page_count는 Agent의 추정치다(mock은 2). PDF를 실제로 렌더링하면 ensure_pdf가
+    # reports.page_count를 실제 페이지 수로 덮어쓰는데, 카드(report_draft 메시지)의 payload.pageCount는
+    # 그대로 남아 "카드는 2장, 전문은 1장"으로 갈렸다(실서버 제보). 카드도 같이 맞춰야 한다.
+    await client.post(f"/cases/{judged_case}/report", headers=auth_headers)
+    await settle()
+    await client.post(f"/cases/{judged_case}/report/versions/1/pdf", headers=auth_headers)
+
+    full = (await client.get(f"/cases/{judged_case}/report/versions/1", headers=auth_headers)).json()
+    msgs = (await client.get(f"/cases/{judged_case}/messages", headers=auth_headers)).json()["items"]
+    card = next(m for m in msgs if m["type"] == "report_draft")
+    assert card["payload"]["pageCount"] == full["pageCount"], (card["payload"]["pageCount"], full["pageCount"])

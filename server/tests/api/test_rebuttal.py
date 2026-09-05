@@ -169,3 +169,24 @@ async def test_rebuttal_patch_bounds_user_strings(client, auth_headers, reported
     long_email = "a" * 320 + "@example.com"
     res = await client.patch(url, json={"recipient": long_email}, headers=auth_headers)
     assert res.status_code == 422 and res.json()["error"]["code"] == "VALIDATION_FAILED"
+
+
+async def test_patch_refreshes_draft_card(client, auth_headers, reported_case, settle, sse):
+    # 다이얼로그(G-3)에서 수신자·접수번호를 고치면 G-2 응답은 live 지만, 채팅 카드(rebuttal_draft)는 Job이 만든
+    # 시점의 스냅샷이라 "아직 안 정했어요 · canSend false"로 남았다(경위서 pageCount와 같은 패턴). 카드도 따라와야 한다.
+    await client.post(f"/cases/{reported_case}/rebuttal", headers=auth_headers)
+    await settle()
+    tap = await sse(reported_case)
+    res = await client.patch(
+        f"/cases/{reported_case}/rebuttal", json={"recipient": "kim@insu.co.kr", "claimNumber": "2026-09-0001"}, headers=auth_headers
+    )
+    assert res.status_code == 200, res.text
+
+    msgs = (await client.get(f"/cases/{reported_case}/messages", headers=auth_headers)).json()["items"]
+    card = next(m for m in msgs if m["type"] == "rebuttal_draft")["payload"]
+    assert card["recipient"] == "kim@insu.co.kr" and card["claimNumber"] == "2026-09-0001"
+    assert card["canSend"] is True and card["blockedBy"] == []
+    assert card["subject"] == "과실비율 재검토 요청 (접수번호 2026-09-0001)"
+
+    frames = await tap.take(1)
+    assert "event: message.updated" in frames[0] and '"type": "rebuttal_draft"' in frames[0] and '"canSend": true' in frames[0]

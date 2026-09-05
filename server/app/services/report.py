@@ -10,6 +10,7 @@ from app.errors import ApiError
 from app.ids import new_id
 from app.models import Case, Job, Message, Report, ReportPdf
 from app.pdf.report_pdf import render_report_pdf, report_pdf_filename
+from app.security import create_download_token
 from app.services import cases as case_service
 from app.services.actions import register_action
 from app.services.presenters import ordinal_label
@@ -101,12 +102,30 @@ async def draft_card(db: AsyncSession, case_id: str) -> Message | None:
     return (await db.execute(stmt)).scalars().first()
 
 
+async def sync_draft_card(db: AsyncSession, case_id: str, report: Report) -> None:
+    """카드(report_draft)의 pageCount 를 reports.page_count 에 맞춘다.
+
+    카드의 pageCount 는 생성 시점의 Agent 추정치다. PDF 를 실제로 렌더링하면 ensure_pdf 가
+    reports.page_count 를 실제 페이지 수로 덮어쓰는데, 카드는 아무도 갱신하지 않아 "카드 2장·전문 1장"으로
+    갈렸다(실서버 제보). 카드는 최신 버전 하나뿐이니 같은 report 일 때만 건드린다. 이미 PDF 가 있는
+    경위서(예전에 갈린 것)도 다음 PDF 요청·발송 때 여기서 맞춰진다.
+    """
+    card = await draft_card(db, case_id)
+    if card is None or card.payload.get("reportId") != report.id:
+        return
+    if card.payload.get("pageCount") == report.page_count:
+        return
+    await case_service.update_message(db, card, draft_payload(report))
+
+
 async def ensure_pdf(db: AsyncSession, case: Case, report: Report) -> tuple[ReportPdf, bool]:
     # report_id를 미리 뽑아 둔다: rollback은 세션의 객체를 모두 expire시키므로,
     # rollback 이후 report.id에 접근하면 동기 지연로딩이 걸려 MissingGreenlet이 난다.
     report_id = report.id
+    case_id = case.id
     existing = await pdf_for(db, report_id)
     if existing is not None:
+        await sync_draft_card(db, case_id, report)
         return existing, False
     # fpdf2 렌더링은 순수 CPU 작업이다. 이벤트 루프에서 돌리면 그동안 다른 요청과 SSE가 전부 멈춘다.
     data, pages = await asyncio.to_thread(
@@ -118,7 +137,8 @@ async def ensure_pdf(db: AsyncSession, case: Case, report: Report) -> tuple[Repo
     size = await get_storage().put_bytes(key, data)
     pdf = ReportPdf(id=new_id(), report_id=report_id, storage_key=key, filename=report_pdf_filename(case.title, report.created_at), size_bytes=size, created_at=now_utc())
     db.add(pdf)
-    if report.page_count != pages:
+    corrected = report.page_count != pages
+    if corrected:
         report.page_count = pages
     try:
         await db.commit()
@@ -134,13 +154,18 @@ async def ensure_pdf(db: AsyncSession, case: Case, report: Report) -> tuple[Repo
         if existing is not None:
             return existing, False
         raise
+    if corrected:
+        await sync_draft_card(db, case_id, report)
     return pdf, True
 
 
 def pdf_response_dict(case: Case, report: Report, pdf: ReportPdf) -> dict:
     return {
         "pdfId": pdf.id, "version": report.version, "filename": pdf.filename, "sizeBytes": pdf.size_bytes,
-        "downloadUrl": f"/api/v1/cases/{case.id}/report/versions/{report.version}/pdf", "createdAt": to_kst_iso(pdf.created_at),
+        # 브라우저는 <a href>/window.open 으로 이 URL을 여는데 그 요청엔 Authorization 헤더가 실리지 않는다.
+        # 영상 streamUrl(?t=)과 같은 방식으로 단기 토큰을 URL에 담아 헤더 없이도 열리게 한다.
+        "downloadUrl": f"/api/v1/cases/{case.id}/report/versions/{report.version}/pdf?t={create_download_token(report.id)}",
+        "createdAt": to_kst_iso(pdf.created_at),
     }
 
 

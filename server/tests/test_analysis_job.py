@@ -24,7 +24,7 @@ async def test_analysis_job_full_path(client, auth_headers, case_id, upload, sse
     assert '"status": "analyzing"' in frames[1] and '"kind": "analysis"' in frames[1]
     assert "영상을 분석했어요" in frames[2] and '"cta": null' in frames[2]
     assert "1/2" in frames[3]
-    assert '"speedKph": 48' in frames[4]
+    assert '"speedKph": 48' in frames[4] and '"estimated": true' in frames[4]
     assert '"status": "needs_review"' in frames[5] and '"title": "교차로 직진 충돌 · 08-22"' in frames[5]
     assert '"status": "needs_review"' in frames[6] and '"activeJob": null' in frames[6]
 
@@ -32,9 +32,14 @@ async def test_analysis_job_full_path(client, auth_headers, case_id, upload, sse
         a = await db.get(Analysis, case_id)
         assert a.facts["opponent_signal"] == "red" and a.questions
         v = (await db.execute(select(Video).where(Video.case_id == case_id))).scalar_one()
-        assert v.meta == {"speedKph": 48, "impactAtSec": 31}
+        assert v.meta == {"speedKph": 48, "impactAtSec": 31}  # DB에는 Agent 값만. estimated 는 표현 계층에서 붙인다
+        video_id = v.id
         c = await db.get(Case, case_id)
         assert c.status == "needs_review"
+
+    # speedKph·impactAtSec 는 AI 추정치다. durationSec·recordedAt(파일 실측)과 구분할 수 있게 플래그가 붙어야 한다
+    detail = (await client.get(f"/videos/{video_id}", headers=auth_headers)).json()
+    assert detail["meta"]["estimated"] is True and detail["meta"]["speedKph"] == 48
 
 
 async def test_analysis_without_questions_goes_straight_to_verdict(client, auth_headers, case_id, upload, monkeypatch):
