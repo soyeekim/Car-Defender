@@ -358,11 +358,9 @@ def generate_rebuttal_opinion(
     except Exception as exc:  # noqa: BLE001
         logger.log(agent="document_agent", task=task.task, case_id=package.case_id, extra={"error": str(exc)[:300], "fallback": "deterministic_rebuttal"})
         return deterministic_rebuttal(package, report_attached=report_attached)
-        # 다시 쓰기 창에 사용자가 직접 적은 수치(예: 45km/h)는 본인 진술이다. 근거 목록에 넣지 않으면
-        # grounding 가드가 그 문장을 지워 '다시 써도 안 바뀌는' 결과가 된다(실서버 제보).
     return ground_document(
         document,
-        fact_blob=package.fact_blob() + " " + (revision_request or ""),
+        fact_blob=package.fact_blob(),
         allowed_case_ids=package.allowed_case_ids(),
         opponent_claim_provided=bool(package.opponent_claim),
     )

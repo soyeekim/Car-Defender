@@ -154,6 +154,4 @@ def generate_incident_report(
         return deterministic_incident_report(package)
     if not document.caveat:
         document.caveat = _uncertainty_caveat(package)
-    # 다시 쓰기 창에 사용자가 직접 적은 수치(예: 45km/h)는 본인 진술이다. 근거 목록에 넣지 않으면
-    # grounding 가드가 그 문장을 지워 '다시 써도 안 바뀌는' 결과가 된다(실서버 제보).
-    return ground_document(document, fact_blob=package.fact_blob() + " " + (revision_request or ""), allowed_case_ids=package.allowed_case_ids())
+    return ground_document(document, fact_blob=package.fact_blob(), allowed_case_ids=package.allowed_case_ids())
