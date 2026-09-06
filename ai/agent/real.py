@@ -23,6 +23,8 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
+NL = chr(10)
+
 from agent.cache import JudgeCache, agent_tmp_dir
 from agent.codec import STATE_KEY, pack_facts, stored_verdict_version, sync_conversation, unpack_state
 from agent.presenters import (
@@ -206,7 +208,11 @@ class RealAgent:
                 section["body"] = readable_lines(section.get("body", "")) or ""
             return {
                 "sections": sections,
-                "caveat": readable_lines((document.caveat or "").strip()) or None,
+                # grounding 가드가 문장을 지웠으면(근거 없는 속도 수치·미확인 심의번호) 그 사실을 caveat 에 같이 보여 준다.
+                # 안 보여 주면 사용자는 "다시 써도 안 바뀐다"고만 느낀다(실서버 제보).
+                "caveat": readable_lines(NL.join(
+                    part for part in [(document.caveat or "").strip(), *[w for w in (document.warnings or []) if "제거" in w]] if part
+                )) or None,
                 "page_count": estimate_page_count(sections),
             }
         document = document_agent.generate_rebuttal_opinion(
