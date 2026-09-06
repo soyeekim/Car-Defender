@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -504,15 +505,17 @@ def _assign_vehicle_id(state: CaseState, field: str, value: Optional[str]) -> bo
     return True
 
 
-def _match_pending_field(state: CaseState, answered: Optional[str]) -> Optional[str]:
+def _match_pending_field(state: CaseState, answered: Optional[str], *, has_field: bool = False) -> Optional[str]:
     """LLM 이 적은 answers_field 를 실제 대기 질문 필드로 맞춘다.
 
     정확히 같으면 그대로. 아니면 leaf(마지막 조각)가 같은 대기 질문, 그것도 없으면 대기 질문이 하나뿐일 때 그 질문.
     (실서버 대화: 질문 필드는 review.xxx 인데 LLM 이 슬롯 경로를 적어 질문이 안 닫히고 되물었다.)"""
     if not answered:
         return answered
-    pending = [item.field for item in state.pending_questions]
-    if not pending or answered in pending:
+    # 열린 질문("추가 정황 있나요?")은 어떤 진술이든 답으로 치므로 재매핑 대상이 아니다. 슬롯 field 가 명시된 항목은
+    # 그 슬롯의 사실이지 대기 질문의 답이 아닐 수 있으니(예: 열린 질문 중 사고 날짜 진술) 그대로 둔다.
+    pending = [item.field for item in state.pending_questions if item.field != "review.additional_facts"]
+    if not pending or answered in pending or has_field:
         return answered
     leaf = answered.rsplit(".", 1)[-1]
     for field in pending:
@@ -542,7 +545,7 @@ def apply_user_extraction(
 
     for item in extraction.new_facts:
         field = item.field
-        answered = _match_pending_field(state, item.answers_field) or field
+        answered = _match_pending_field(state, item.answers_field, has_field=item.field is not None) or field
         # 질문 field가 실제 슬롯 경로인데 LLM이 field를 비워 보낸 경우 보정
         if field is None and answered and get_slot(state, answered) is not None:
             field = answered
