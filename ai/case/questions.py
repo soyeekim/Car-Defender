@@ -192,8 +192,11 @@ _LANE_KEEP_ANSWER = re.compile(
 )
 
 
-def _maneuver_excluded(vehicle) -> bool:
-    """이 차량이 차로 변경·회전 없이 직진(차로 유지)했다고 볼 수 있나."""
+def _maneuver_excluded(vehicle, *, is_ego: bool) -> bool:
+    """이 차량이 차로 변경·회전 없이 직진(차로 유지)했다고 볼 수 있나.
+
+    상대 차량은 영상이 '차로 변경 없음'으로 명시 확인한 경우에만 제외한다(직진처럼 보여도 화각 밖 차로 변경이 있을 수 있어
+    방향지시등을 묻는 것이 기존 동작). 블랙박스 차량은 자기 진행이 영상에 확실히 남으므로 직진이면 제외한다."""
     lane_change = vehicle.lane_change
     movement = vehicle.movement
     lc_value = str(lane_change.value).strip().lower() if lane_change.is_known() else ""
@@ -202,15 +205,16 @@ def _maneuver_excluded(vehicle) -> bool:
         return False
     if lc_value == "false":
         return True
-    return any(word in mv_value for word in _STRAIGHT_WORDS)
+    return is_ego and any(word in mv_value for word in _STRAIGHT_WORDS)
 
 
 def turn_signal_irrelevant(state: CaseState, field: Optional[str]) -> bool:
     """차로 변경·회전·진입 동작이 없다고 확인된 차량의 방향지시등 질문은 판정에 영향이 없다 — 묻지 않는다."""
     if not field or not field.endswith(".turn_signal"):
         return False
-    vehicle = getattr(state, field.split(".", 1)[0], None)
-    return vehicle is not None and hasattr(vehicle, "lane_change") and _maneuver_excluded(vehicle)
+    side = field.split(".", 1)[0]
+    vehicle = getattr(state, side, None)
+    return vehicle is not None and hasattr(vehicle, "lane_change") and _maneuver_excluded(vehicle, is_ego=(side == "ego_vehicle"))
 
 
 def resolve_pending_by_implication(state: CaseState, message: str) -> list[str]:

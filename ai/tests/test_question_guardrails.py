@@ -114,6 +114,10 @@ def test_turn_signal_is_not_asked_for_vehicle_without_lane_change_or_turn():
     set_slot(state, "other_vehicle.lane_change", "true", source="video", status="CONFIRMED", overwrite=True)
     assert not turn_signal_irrelevant(state, "other_vehicle.turn_signal")
     assert field_is_askable(state, "other_vehicle.turn_signal")
+    # 상대 차량은 직진처럼 보여도 차로 변경이 명시 부정되지 않았으면 묻는다(기존 동작 유지)
+    set_slot(state, "other_vehicle.movement", "직진", source="video", status="CONFIRMED", overwrite=True)
+    state.other_vehicle.lane_change.value, state.other_vehicle.lane_change.status = None, "UNKNOWN"
+    assert not turn_signal_irrelevant(state, "other_vehicle.turn_signal")
 
 
 def test_lane_keeping_answer_resolves_pending_turn_signal_question():
