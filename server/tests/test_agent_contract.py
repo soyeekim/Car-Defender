@@ -10,6 +10,7 @@
 자세한 계약은 docs/agent-interface.md, 스키마 정본은 app/agent/base.py.
 """
 
+import asyncio
 import json
 import os
 
@@ -44,6 +45,25 @@ VERDICT = VerdictSnapshot(
 @pytest.fixture(scope="module")
 def agent():
     return AgentAdapter(load_agent_class(IMPL)())
+
+
+@pytest.fixture(scope="module")
+def analyzed_facts(agent, tmp_path_factory):
+    """judge 에 넘길 facts — 실제 흐름과 같이 analyze() 가 돌려준 facts 를 쓴다.
+
+    구현체는 분석 결과(차종·충돌 형태·진입 방향 등)를 facts 에 담아 두고 judge 에서 그걸로 심의사례를 검증한다.
+    손으로 쓴 facts 몇 개만 넘기면 실제 구현체는 사고 구조를 확인하지 못해 판례를 하나도 내지 않는다(실측).
+    영상이 없으면(mock) 1KB 더미로 돌리고, 손으로 쓴 FACTS 는 그 위에 덧붙인다.
+    """
+    path = VIDEO
+    if not path or not os.path.exists(path):
+        path = str(tmp_path_factory.mktemp("contract") / "sample.mp4")
+        open(path, "wb").write(b"\x00" * 1024)
+    r = asyncio.run(agent.analyze(AnalyzeInput(
+        video_path=path, video_mime="video/mp4",
+        description="교차로에서 직진 중 우측에서 진입한 오토바이와 부딪혔어요.",
+    )))
+    return {**FACTS, **r.facts}
 
 
 def assert_json_safe(value, where: str):
@@ -89,8 +109,8 @@ async def test_chat_can_request_verdict(agent):
     assert r.next_action in ("none", "verdict", "rejudge", "create_report", "create_rebuttal")
 
 
-async def test_judge(agent):
-    r = await agent.judge(JudgeInput(messages=MESSAGES, facts=FACTS, previous_verdict=None))
+async def test_judge(agent, analyzed_facts):
+    r = await agent.judge(JudgeInput(messages=MESSAGES, facts=analyzed_facts, previous_verdict=None))
     assert r.ratio_mine + r.ratio_other == 100
     assert r.summary.strip(), "summary 가 비었어요. 판정 카드 본문이에요."
     assert r.basis.chart.name.strip(), "basis.chart.name 이 비었어요. 근거로 삼은 도표 이름이에요."
@@ -104,11 +124,11 @@ async def test_judge(agent):
         )
 
 
-async def test_judge_rejudge_explains_change(agent):
+async def test_judge_rejudge_explains_change(agent, analyzed_facts):
     """재판정이면 무엇이 왜 바뀌었는지 사용자에게 설명해야 한다."""
     r = await agent.judge(JudgeInput(
         messages=MESSAGES + [ChatTurn(role="user", text="사실 신호가 황색이었어요")],
-        facts=FACTS, previous_verdict=VERDICT,
+        facts=analyzed_facts, previous_verdict=VERDICT,
     ))
     assert r.ratio_mine + r.ratio_other == 100
     if (r.ratio_mine, r.ratio_other) != (VERDICT.ratio_mine, VERDICT.ratio_other):
