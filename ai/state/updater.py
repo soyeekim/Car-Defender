@@ -57,6 +57,12 @@ _TYPE_ALIASES = {
     "third party": "third_party",
 }
 _UNKNOWN_ANSWERS = {"unknown", "모름", "모르겠", "기억 안", "기억안", "확인 불가", "n/a", "none", "null", ""}
+# 활용형까지: 모릅니다·몰라요·몰랐어요·기억이 안 나요·기억나지 않아요·못 봤어요·확인 안 됐어요·알 수 없어요·글쎄요·패스
+# (실서버 대화: "모릅니다."에 LLM 이 항목을 냈는데 value 가 원문이라 unknown 으로 안 잡혀 같은 질문을 되물음)
+_UNKNOWN_ANSWER_RE = re.compile(
+    r"(모릅|모르|몰라|몰랐|기억(이|은)?\s*(안|나지|못)|못\s*(봤|보았|확인)|확인\s*(못|안|불가)|알\s*수\s*없|잘\s*모|글쎄|패스|unknown|n/a)",
+    re.IGNORECASE,
+)
 
 
 class ExtractedFact(BaseModel):
@@ -129,11 +135,19 @@ def normalize_value(field: Optional[str], value: Any) -> Optional[str]:
     return text
 
 
-def is_unknown_answer(value: Optional[str]) -> bool:
+def is_unknown_answer(value: Optional[str], *, fact: Optional[str] = None) -> bool:
+    """값이 '모른다'는 답인가. value 가 원문("모릅니다")이거나 fact 문장에만 드러나는 경우까지 본다."""
     if value is None:
         return True
     lowered = str(value).strip().lower()
-    return any(marker and marker in lowered for marker in _UNKNOWN_ANSWERS) or lowered in _UNKNOWN_ANSWERS
+    if any(marker and marker in lowered for marker in _UNKNOWN_ANSWERS) or lowered in _UNKNOWN_ANSWERS:
+        return True
+    if _UNKNOWN_ANSWER_RE.search(lowered):
+        return True
+    # 짧은 fact 문장이 통째로 '모른다'는 뜻일 때(예: "상대 신호 준수 여부는 모른다고 답함")
+    if fact and len(fact) <= 40 and _UNKNOWN_ANSWER_RE.search(fact) and not any(w in fact for w in ("켰", "않았", "안 켰", "였", "이었")):
+        return True
+    return False
 
 
 def set_slot(
@@ -490,6 +504,25 @@ def _assign_vehicle_id(state: CaseState, field: str, value: Optional[str]) -> bo
     return True
 
 
+def _match_pending_field(state: CaseState, answered: Optional[str]) -> Optional[str]:
+    """LLM 이 적은 answers_field 를 실제 대기 질문 필드로 맞춘다.
+
+    정확히 같으면 그대로. 아니면 leaf(마지막 조각)가 같은 대기 질문, 그것도 없으면 대기 질문이 하나뿐일 때 그 질문.
+    (실서버 대화: 질문 필드는 review.xxx 인데 LLM 이 슬롯 경로를 적어 질문이 안 닫히고 되물었다.)"""
+    if not answered:
+        return answered
+    pending = [item.field for item in state.pending_questions]
+    if not pending or answered in pending:
+        return answered
+    leaf = answered.rsplit(".", 1)[-1]
+    for field in pending:
+        if field.rsplit(".", 1)[-1] == leaf:
+            return field
+    if len(pending) == 1:
+        return pending[0]
+    return answered
+
+
 def _clear_pending(state: CaseState, field: Optional[str]) -> None:
     if not field:
         return
@@ -509,11 +542,11 @@ def apply_user_extraction(
 
     for item in extraction.new_facts:
         field = item.field
-        answered = item.answers_field or field
+        answered = _match_pending_field(state, item.answers_field) or field
         # 질문 field가 실제 슬롯 경로인데 LLM이 field를 비워 보낸 경우 보정
         if field is None and answered and get_slot(state, answered) is not None:
             field = answered
-        if is_unknown_answer(item.value) and (field or answered):
+        if is_unknown_answer(item.value, fact=item.fact) and (field or answered):
             note = f"사용자가 {answered}에 대해 모른다고 답함"
             if note not in state.uncertain_facts:
                 state.uncertain_facts.append(note)

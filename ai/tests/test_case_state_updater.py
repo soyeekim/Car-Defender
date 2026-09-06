@@ -139,3 +139,40 @@ def test_compact_state_labels_sources():
     assert compact["road"]["road_type"].endswith("[VIDEO_CONFIRMED]")
     assert compact["user_vehicle"]["vehicle_id"] == "vehicle_1"
     assert compact["video_collision_pair"]["participants"] == ["vehicle_1", "vehicle_3"]
+
+
+def test_unknown_answer_in_natural_korean_closes_pending_question():
+    """실서버 대화: "모릅니다."에 LLM 이 항목을 냈지만 value 가 원문이고 answers_field 가 질문 필드와 달라 질문이 안 닫혔다."""
+    from state.case_state import Question
+    from state.updater import is_unknown_answer
+
+    for text in ("모릅니다", "몰라요", "몰랐어요", "기억이 안 나요", "기억나지 않아요", "못 봤어요", "확인 못 했어요", "알 수 없어요", "글쎄요", "unknown"):
+        assert is_unknown_answer(text), text
+    for text in ("켰어요", "안 켰어요", "초록불이었어요", "2차로였어요"):
+        assert not is_unknown_answer(text), text
+
+    state = CaseState(video_path="x.mp4", video_uploaded=True)
+    merge_video_facts(state, VideoResult.from_observation(sample_observation(), video_backend="fake"))
+    state.pending_questions = [Question(field="review.opponent_signal_compliance", question="상대 차량이 교차로 신호를 준수했나요?", importance="high")]
+    extraction = UserFactExtraction(
+        new_facts=[ExtractedFact(field=None, answers_field="other_vehicle.signal", value="모릅니다", fact="상대 신호 준수 여부는 모른다고 답함", verification="unverified")]
+    )
+    apply_user_extraction(state, extraction, turn=3)
+    assert state.pending_questions == []
+    assert "review.opponent_signal_compliance" in state.asked_fields
+    assert any("모른다고 답함" in note for note in state.uncertain_facts)
+
+
+def test_answers_field_is_matched_to_the_single_pending_question():
+    """LLM 이 answers_field 를 다른 이름으로 적어도 대기 질문이 하나뿐이면 그 질문의 답으로 본다."""
+    from state.case_state import Question
+
+    state = CaseState(video_path="x.mp4", video_uploaded=True)
+    merge_video_facts(state, VideoResult.from_observation(sample_observation(), video_backend="fake"))
+    state.pending_questions = [Question(field="review.entered_first", question="본인 차량이 먼저 진입했나요?", importance="high")]
+    extraction = UserFactExtraction(
+        new_facts=[ExtractedFact(field=None, answers_field="ego_vehicle.entered_first", value="true", fact="본인 차량이 먼저 진입", verification="unverified")]
+    )
+    apply_user_extraction(state, extraction, turn=4)
+    assert state.pending_questions == []
+    assert state.review_answers.get("review.entered_first") == "true"

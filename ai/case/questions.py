@@ -368,7 +368,10 @@ def asked_fields_text(state: CaseState) -> str:
     return "\n".join(lines) or "(없음)"
 
 
-UNKNOWN_ANSWER_PATTERN = re.compile(r"(모르|몰라|기억\s*안|기억이\s*안|못\s*봤|확인\s*못|잘\s*안\s*보|글쎄)")
+# 활용형 포함 (모릅니다·몰라요·몰랐어요·기억이 안 나요·기억나지 않아요·못 봤어요·확인 안 됐어요·알 수 없어요·패스)
+UNKNOWN_ANSWER_PATTERN = re.compile(
+    r"(모릅|모르|몰라|몰랐|기억(이|은)?\s*(안|나지|못)|못\s*(봤|보았|확인)|확인\s*(못|안|불가)|알\s*수\s*없|잘\s*(안\s*보|모)|글쎄|패스)"
+)
 
 
 def mark_pending_unknown(state: CaseState, message: str) -> list[str]:

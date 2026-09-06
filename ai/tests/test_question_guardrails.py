@@ -135,3 +135,17 @@ def test_lane_keeping_answer_resolves_pending_turn_signal_question():
     state.pending_questions = [Question(field="ego_vehicle.turn_signal", question="q", importance="high")]
     assert resolve_pending_by_implication(state, "날씨가 맑았어요.") == []
     assert len(state.pending_questions) == 1
+
+
+def test_fallback_patterns_understand_common_korean_answers():
+    """안전망 정규식도 활용형을 알아야 한다: 모릅니다 / 특별히 없어요 / 넵."""
+    from agents.master_agent import _AFFIRMATIVE, _NEGATIVE_ANSWER
+    from case.questions import UNKNOWN_ANSWER_PATTERN
+
+    for text in ("모릅니다.", "몰라요", "몰랐어요", "기억이 안 나요", "기억나지 않아요", "확인 안 됐어요", "알 수 없어요", "패스"):
+        assert UNKNOWN_ANSWER_PATTERN.search(text), text
+    for text in ("모릅니다.", "특별히 없어요", "별로요", "음, 없는 것 같아요", "글쎄요, 아니요"):
+        assert _NEGATIVE_ANSWER.match(text), text
+    for text in ("넵", "넹", "맞아요", "그럼요", "당연하죠", "ㅇㅋ"):
+        assert _AFFIRMATIVE.match(text), text
+    assert not _AFFIRMATIVE.match("아니요")
