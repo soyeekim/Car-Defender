@@ -149,3 +149,28 @@ def test_fallback_patterns_understand_common_korean_answers():
     for text in ("넵", "넹", "맞아요", "그럼요", "당연하죠", "ㅇㅋ"):
         assert _AFFIRMATIVE.match(text), text
     assert not _AFFIRMATIVE.match("아니요")
+
+
+def test_short_yes_no_answer_closes_pending_question():
+    """실서버 대화: "아니요."라고 답했는데 '모름'이라고 할 때까지 같은 질문을 되물었다."""
+    from case.questions import mark_pending_yes_no
+    from state.updater import set_slot
+
+    state = _video_state()
+    # review.* 질문 → review_answers
+    state.pending_questions = [Question(field="review.opponent_gross_negligence", question="상대 운전자가 음주·졸음 등 주의 의무를 현저히 위반했나요?", importance="high")]
+    assert mark_pending_yes_no(state, "아니요.") == ["review.opponent_gross_negligence"]
+    assert state.pending_questions == [] and state.review_answers["review.opponent_gross_negligence"] == "false"
+    assert "review.opponent_gross_negligence" in state.asked_fields
+    # 슬롯 질문 → 슬롯
+    state.other_vehicle.turn_signal.value, state.other_vehicle.turn_signal.status = None, "UNKNOWN"
+    state.pending_questions = [Question(field="other_vehicle.turn_signal", question="상대 차량이 방향지시등을 켰나요?", importance="high")]
+    assert mark_pending_yes_no(state, "네") == ["other_vehicle.turn_signal"]
+    assert state.other_vehicle.turn_signal.value == "true" and state.other_vehicle.turn_signal.source == "user"
+    # 긴 문장·열린 질문·대기 질문 2개면 건드리지 않는다
+    state.pending_questions = [Question(field="other_vehicle.turn_signal", question="q", importance="high")]
+    assert mark_pending_yes_no(state, "아니요, 근데 상대가 갑자기 들어왔어요.") == []
+    state.pending_questions = [Question(field="review.additional_facts", question="추가 정황?", importance="low")]
+    assert mark_pending_yes_no(state, "아니요") == []
+    state.pending_questions = [Question(field="a.b", question="q1", importance="high"), Question(field="c.d", question="q2", importance="high")]
+    assert mark_pending_yes_no(state, "네") == []

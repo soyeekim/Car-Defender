@@ -29,6 +29,7 @@ from case.questions import (
     format_questions,
     generate_followup_questions,
     mark_pending_unknown,
+    mark_pending_yes_no,
     resolve_pending_by_implication,
     unregister_questions,
     video_gap_candidates,
@@ -331,6 +332,10 @@ class MasterAccidentAgent:
         implied_fields = resolve_pending_by_implication(state, message) if state.pending_questions else []
         if implied_fields:
             events.append("진술로 질문 해소: " + ", ".join(implied_fields))
+        # guardrail: "네" / "아니요" 한마디는 추출기가 사실 없음으로 볼 수 있다 — 코드가 대기 질문의 답으로 기록한다
+        yes_no_fields = mark_pending_yes_no(state, message) if state.pending_questions else []
+        if yes_no_fields:
+            events.append("새 사실 반영: " + ", ".join(f"{field} 예/아니오 답" for field in yes_no_fields))
         answered_fields = pending_before - {item.field for item in state.pending_questions}
         if added:
             events.append("새 사실 반영: " + "; ".join(fact.fact for fact in added[:4]))

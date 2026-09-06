@@ -29,7 +29,8 @@
 - 사용자가 모른다는 뜻으로 답하면("모른다", "모릅니다", "몰라요", "모르겠어요", "기억 안 난다", "기억이 안 나요", "못 봤어요",
   "확인 못 했어요", "글쎄요", "패스") value를 반드시 문자열 "unknown"으로 하고 answers_field에 직전 질문의 [field]를 그대로 적는다.
   사용자의 표현을 value 에 옮겨 적지 않는다.
-- 직전 질문에 대한 답이면 answers_field에 그 질문의 [field]를 그대로 적는다.
+- 직전 질문에 대한 답이면 answers_field에 그 질문의 [field]를 그대로 적는다. "네", "아니요", "없었어요" 같은
+  한마디 답도 반드시 new_facts 항목 하나로 낸다(no_new_facts 로 끝내지 않는다) — value 는 "true"/"false".
   * 질문 field가 아래 허용 슬롯 경로이면 field에도 같은 값을 적는다.
   * 질문 field가 `review.`로 시작하는 custom field이면 field는 null로 두고 answers_field에만 적는다. value는 예/아니오 답이면 "true"/"false", 그 외에는 짧은 사실 문구.
 - 사용자의 진술이 영상에서 확인 가능한 항목이면 verification을 판단하라:

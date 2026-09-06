@@ -374,6 +374,40 @@ UNKNOWN_ANSWER_PATTERN = re.compile(
 )
 
 
+# 대기 질문에 대한 짧은 예/아니오 답. 긴 문장은 LLM 추출이 맡고, 여기서는 한마디 답만 받는다.
+# (실서버 대화: "아니요."라고 분명히 답했는데 LLM 이 항목을 내지 않아 '모름'이라고 할 때까지 되물었다)
+_YES_ANSWER = re.compile(r"^\s*(네|예|넵|넹|응|어|맞아요|맞습니다|맞아|그래요|그렇습니다|그렇죠|켰어요|켰습니다|있었어요|있었습니다|했어요|했습니다|yes|y)\s*[.!~]*\s*$", re.IGNORECASE)
+_NO_ANSWER = re.compile(r"^\s*(아니요|아니오|아뇨|아니|아닙니다|아니에요|아니예요|없었어요|없었습니다|없어요|없습니다|안\s*켰어요|안\s*켰습니다|켜지\s*않았어요|하지\s*않았어요|안\s*했어요|no|n)\s*[.!~]*\s*$", re.IGNORECASE)
+
+
+def mark_pending_yes_no(state: CaseState, message: str) -> list[str]:
+    """'네' / '아니요' 한마디를 대기 중인 예·아니오 질문의 답으로 기록한다.
+
+    열린 질문(추가 정황)은 제외하고, 대기 질문이 정확히 하나일 때만 적용한다(둘 이상이면 어느 질문의 답인지 모른다).
+    슬롯 질문이면 슬롯에 true/false 를 넣고, review.* 질문이면 review_answers 에 넣는다."""
+    pending = [item for item in state.pending_questions if item.field != "review.additional_facts"]
+    if len(pending) != 1:
+        return []
+    if _YES_ANSWER.match(message):
+        value = "true"
+    elif _NO_ANSWER.match(message):
+        value = "false"
+    else:
+        return []
+    question = pending[0]
+    field = question.field
+    if field.startswith("review.") or get_slot(state, field) is None:
+        state.review_answers[field] = value
+    else:
+        set_slot(state, field, value, source="user", status="CONFIRMED", confidence=0.85, note="짧은 예/아니오 답")
+    if field not in state.asked_fields:
+        state.asked_fields.append(field)
+    state.pending_questions = [item for item in state.pending_questions if item.field != field]
+    state.missing_information = [item for item in state.missing_information if item.field != field]
+    state.touch()
+    return [field]
+
+
 def mark_pending_unknown(state: CaseState, message: str) -> list[str]:
     """'잘 모르겠어요' 같은 답은 코드 레벨에서 pending 질문에 대한 '모름' 답변으로 처리한다."""
     if not state.pending_questions or not UNKNOWN_ANSWER_PATTERN.search(message):
