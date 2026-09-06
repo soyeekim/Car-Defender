@@ -97,3 +97,37 @@ def test_opponent_direction_is_never_asked_to_user(tmp_path):
     driver = Question(field="review.opponent_driver_state", question="경찰 조사에서 상대 운전자의 음주·무면허가 확인됐나요?", why="중대한 과실")
     assert classify_video_topic(state, driver, max_rechecks=0)[0] == "ask"
 
+
+
+def test_turn_signal_is_not_asked_for_vehicle_without_lane_change_or_turn():
+    """실서버 대화: 차로를 유지한 블랙박스 차량에게 방향지시등을 물었다. 직진·차로 유지 차량의 방향지시등은 과실 요소가 아니다."""
+    from case.questions import field_is_askable, turn_signal_irrelevant
+    from state.updater import set_slot
+
+    state = _video_state()
+    state.ego_vehicle.vehicle_id, state.other_vehicle.vehicle_id = "vehicle_1", "vehicle_2"
+    set_slot(state, "ego_vehicle.movement", "직진", source="video", status="CONFIRMED", overwrite=True)
+    set_slot(state, "ego_vehicle.lane_change", "false", source="video", status="CONFIRMED", overwrite=True)
+    assert turn_signal_irrelevant(state, "ego_vehicle.turn_signal")
+    assert not field_is_askable(state, "ego_vehicle.turn_signal")
+    # 차로를 바꾼 상대 차량의 방향지시등은 그대로 묻는다
+    set_slot(state, "other_vehicle.lane_change", "true", source="video", status="CONFIRMED", overwrite=True)
+    assert not turn_signal_irrelevant(state, "other_vehicle.turn_signal")
+    assert field_is_askable(state, "other_vehicle.turn_signal")
+
+
+def test_lane_keeping_answer_resolves_pending_turn_signal_question():
+    """실서버 대화: "제 차선에서 주행중이었습니다"에 "확인했어요"라 하고 같은 방향지시등 질문을 그대로 되물었다."""
+    from case.questions import resolve_pending_by_implication
+
+    state = _video_state()
+    state.ego_vehicle.vehicle_id = "vehicle_1"
+    state.pending_questions = [Question(field="ego_vehicle.turn_signal", question="블랙박스 차량(vehicle_1)의 방향지시등이 켜져 있었나요?", importance="high")]
+    assert resolve_pending_by_implication(state, "저는 제 차선에서 주행중이었습니다.") == ["ego_vehicle.turn_signal"]
+    assert state.pending_questions == []
+    assert state.ego_vehicle.lane_change.value == "false" and state.ego_vehicle.lane_change.source == "user"
+    assert "ego_vehicle.turn_signal" in state.asked_fields and "ego_vehicle.turn_signal" in state.review_answers
+    # 관련 없는 답은 건드리지 않는다
+    state.pending_questions = [Question(field="ego_vehicle.turn_signal", question="q", importance="high")]
+    assert resolve_pending_by_implication(state, "날씨가 맑았어요.") == []
+    assert len(state.pending_questions) == 1

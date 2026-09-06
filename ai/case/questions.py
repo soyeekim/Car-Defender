@@ -17,7 +17,7 @@ from models.clients import TextClient
 from prompts.loader import load_prompt
 from settings import get_settings
 from state.case_state import CaseState, MissingInformation, Question
-from state.updater import get_slot
+from state.updater import get_slot, set_slot
 from telemetry import RunLogger, get_run_logger
 
 SUBJECTIVE_MARKERS = (
@@ -180,6 +180,61 @@ def unregister_questions(state: CaseState, questions: list[Question], *, review:
     state.touch()
 
 
+# 방향지시등은 차로 변경·회전·진입 동작이 있을 때만 과실 요소다. 직진·차로 유지로 확인된 차량에겐 묻지 않는다
+# (실서버 대화: 차로를 유지한 블랙박스 차량에게 방향지시등을 물어봄).
+_TURNING_WORDS = ("좌회전", "우회전", "회전", "유턴", "u-turn", "turn", "진입", "enter", "merge", "차로 변경", "차선 변경", "lane_change", "change")
+_STRAIGHT_WORDS = ("직진", "straight", "유지", "keep")
+_LANE_KEEP_ANSWER = re.compile(
+    r"(차선|차로)\s*(을|를)?\s*(유지|그대로|안\s*바꿨|바꾸지\s*않|변경\s*(안|하지))"
+    r"|제\s*(차선|차로)(에서|으로|대로)\s*(주행|가고|달리|계속)"
+    r"|직진\s*(중|했|하고)"
+    r"|(차선|차로)\s*변경\s*(없|안)"
+)
+
+
+def _maneuver_excluded(vehicle) -> bool:
+    """이 차량이 차로 변경·회전 없이 직진(차로 유지)했다고 볼 수 있나."""
+    lane_change = vehicle.lane_change
+    movement = vehicle.movement
+    lc_value = str(lane_change.value).strip().lower() if lane_change.is_known() else ""
+    mv_value = str(movement.value).strip().lower() if movement.is_known() else ""
+    if lc_value == "true" or any(word in mv_value for word in _TURNING_WORDS):
+        return False
+    if lc_value == "false":
+        return True
+    return any(word in mv_value for word in _STRAIGHT_WORDS)
+
+
+def turn_signal_irrelevant(state: CaseState, field: Optional[str]) -> bool:
+    """차로 변경·회전·진입 동작이 없다고 확인된 차량의 방향지시등 질문은 판정에 영향이 없다 — 묻지 않는다."""
+    if not field or not field.endswith(".turn_signal"):
+        return False
+    vehicle = getattr(state, field.split(".", 1)[0], None)
+    return vehicle is not None and hasattr(vehicle, "lane_change") and _maneuver_excluded(vehicle)
+
+
+def resolve_pending_by_implication(state: CaseState, message: str) -> list[str]:
+    """답이 질문 필드에 직접 매핑되진 않지만 그 질문을 무의미하게 만드는 진술을 코드가 처리한다.
+
+    방향지시등 질문에 "제 차선에서 주행 중이었어요"라고 답하면 본인 차량 차로 변경 없음으로 기록하고 질문을 닫는다.
+    안 그러면 "확인했어요"라고 해 놓고 같은 질문을 그대로 되묻는다(실서버 대화)."""
+    if not state.pending_questions or not _LANE_KEEP_ANSWER.search(message):
+        return []
+    set_slot(state, "ego_vehicle.lane_change", "false", source="user", status="CONFIRMED", confidence=0.8, note="사용자 진술: 차로 유지")
+    resolved: list[str] = []
+    for question in list(state.pending_questions):
+        if question.field != "ego_vehicle.turn_signal":
+            continue
+        state.review_answers[question.field] = "차로 변경 없음 — 방향지시등 무관"
+        if question.field not in state.asked_fields:
+            state.asked_fields.append(question.field)
+        state.pending_questions = [item for item in state.pending_questions if item.field != question.field]
+        resolved.append(question.field)
+    if resolved:
+        state.touch()
+    return resolved
+
+
 def video_gap_candidates(state: CaseState, *, max_items: int = 2) -> list[MissingInformation]:
     """영상 분석의 unknown/uncertain 항목을 사용자가 답할 수 있는 질문 후보로 바꾼다."""
     if not state.video_analyzed:
@@ -192,6 +247,8 @@ def video_gap_candidates(state: CaseState, *, max_items: int = 2) -> list[Missin
         if not any(keyword.lower() in blob for keyword in keywords):
             continue
         if field in state.asked_fields or field in state.review_answers:
+            continue
+        if turn_signal_irrelevant(state, field):
             continue
         slot = get_slot(state, field)
         if slot is not None and slot.is_known() and slot.status == "CONFIRMED":
@@ -275,6 +332,8 @@ def field_is_askable(state: CaseState, field: Optional[str], question: Optional[
     if not field:
         return False
     if field in state.asked_fields or field in state.review_answers:
+        return False
+    if turn_signal_irrelevant(state, field):
         return False
     # other_vehicle.turn_signal_right 처럼 이미 물은 항목에 접미사만 붙인 변형
     for asked in state.asked_fields:

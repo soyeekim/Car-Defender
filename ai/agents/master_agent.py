@@ -24,7 +24,15 @@ from agents.video_agent import VideoAnalysisAgent, VideoDecision
 from assessment.fault_ratio import assess_fault_ratio
 from case.extractor import extract_case_facts
 from case.fact_labels import generate_fact_labels
-from case.questions import MAX_ASK_COUNT, format_questions, generate_followup_questions, mark_pending_unknown, unregister_questions, video_gap_candidates
+from case.questions import (
+    MAX_ASK_COUNT,
+    format_questions,
+    generate_followup_questions,
+    mark_pending_unknown,
+    resolve_pending_by_implication,
+    unregister_questions,
+    video_gap_candidates,
+)
 from case.review import ADDITIONAL_FACTS_FIELD
 from case.sufficiency import SufficiencyResult, check_information_sufficiency
 from common.jsonutil import compact_json
@@ -319,6 +327,10 @@ class MasterAccidentAgent:
         unknown_fields = mark_pending_unknown(state, message) if state.pending_questions else []
         if unknown_fields:
             events.append("사용자가 모른다고 답함: " + ", ".join(unknown_fields))
+        # guardrail: "제 차선에서 주행 중이었어요" 같은 답은 방향지시등 질문을 무의미하게 만든다 — 코드가 닫는다
+        implied_fields = resolve_pending_by_implication(state, message) if state.pending_questions else []
+        if implied_fields:
+            events.append("진술로 질문 해소: " + ", ".join(implied_fields))
         answered_fields = pending_before - {item.field for item in state.pending_questions}
         if added:
             events.append("새 사실 반영: " + "; ".join(fact.fact for fact in added[:4]))
@@ -632,7 +644,8 @@ class MasterAccidentAgent:
                 item.ask_count += 1
                 item.asked_turn = state.turn_count
             if answered_now:
-                text = (claim_ack or "확인했어요.") + "\n" + format_questions("", pending)
+                # 새 사실은 반영됐지만 이 질문엔 답이 안 됐다. "확인했어요"라며 같은 질문을 그대로 되묻지 않는다(실서버 대화)
+                text = (claim_ack or "말씀하신 내용은 반영했어요.") + "\n다만 아래 질문에는 아직 답을 못 받았어요. 모르시면 '모름'이라고 답해 주셔도 돼요.\n" + format_questions("", pending)
             elif pending[0].field == ADDITIONAL_FACTS_FIELD:
                 text = "추가로 알려주실 사고 정황이 있으면 말씀해 주시고, 없으면 '없어요'라고 답해 주세요."
             else:
