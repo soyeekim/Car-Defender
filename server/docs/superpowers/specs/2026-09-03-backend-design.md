@@ -230,7 +230,7 @@ class Agent(Protocol):
 
 ## 8. 문서 생성·메일
 
-- **PDF** (`pdf/report_pdf.py`): fpdf2. NanumGothic(OFL) Regular/Bold 등록. 제목 `사건경위서`, 사건 제목·날짜, 4개 절, 하단 고지 문구. `page_count`는 생성 후 실제 페이지 수로 `reports.page_count`를 덮어쓴다. 파일명 `사건경위서_{사건제목}_{YYYYMMDD}.pdf`(제목의 파일 금지 문자는 `_`로).
+- **PDF** (`pdf/report_pdf.py`): fpdf2. NanumGothic(OFL) Regular/Bold 등록. 제목 `사건경위서`, 사건 제목·날짜, 4개 절, 하단 고지 문구. 경위서를 만들 때 PDF 를 바로 렌더링해 `page_count` 를 실측 페이지 수로 저장한다(Agent 의 `page_count` 는 쓰지 않는다). 렌더링이 실패한 경우에만 다운로드·발송 시점에 다시 만들고 그때 카드도 맞춘다. 파일명 `사건경위서_{사건제목}_{YYYYMMDD}.pdf`(제목의 파일 금지 문자는 `_`로).
 - **메일** (`mail/`): `Mailer.send(MailMessage) → provider_message_id`. `smtp`는 aiosmtplib(STARTTLS/SSL 환경 변수), `mock`은 로그 출력 + 가짜 ID. 헤더는 `From: "Fairway ({email})" <MAIL_FROM>`, `Reply-To`=가입 이메일. **명세 §8.1과 다른 점: `Sender` 헤더는 넣지 않는다.** SES가 `Sender` 주소도 검증된 자격 증명일 것을 요구해(`554 Email address is not verified`) 사용자 주소를 넣으면 발송 자체가 거부된다(샌드박스·프로덕션 공통, 실측 확인). 사용자 주소를 전부 SES에 등록할 수 없으므로 회신 경로는 `Reply-To`가, 보낸 사람 표시는 `From`의 display name이 담당한다. 본문 말미 고정 문구 추가. 첨부 합계 25MB 초과면 영상 제외 + 안내 한 줄.
 - **발송 (G-4)**: `Idempotency-Key` 없으면 400 → 같은 키의 `send_logs` 있으면 그 결과 반환 → 검증(recipient·claimNumber·status) → 메일 동기 발송 → 성공: `rebuttals.status=sent` · `send_logs` INSERT · `sent` 카드 · `rebuttal.sent` · `case.updated`(sent). 실패: `send_logs`에 `result=failed` 기록 후 `MAIL_SEND_FAILED` 502. 실패 기록은 G-5 목록에서 `result: failed`로 보인다.
 - **`sending` 노출**: `Rebuttal.status`에는 일시적 값 `sending`이 있다. G-2 응답의 status에 일시적 값 `"sending"`이 노출될 수 있다(`editable=false`, `canSend=false`); 클라이언트는 draft로 취급. 이 상태에서는 수정(G-3)·재생성(G-1)·발송(G-4) 모두 `REBUTTAL_ALREADY_SENT`로 막힌다.

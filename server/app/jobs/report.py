@@ -1,3 +1,5 @@
+import logging
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.base import Section, WriteInput
@@ -7,8 +9,10 @@ from app.ids import new_id
 from app.jobs.runner import JobHandler
 from app.models import Case, Report
 from app.services import cases as case_service
-from app.services.report import draft_card, draft_payload
+from app.services.report import draft_card, draft_payload, ensure_pdf
 from app.services.verdict import recent_turns, snapshot
+
+log = logging.getLogger(__name__)
 
 
 def make_report_handler(revision_request: str | None) -> JobHandler:
@@ -36,6 +40,14 @@ def make_report_handler(revision_request: str | None) -> JobHandler:
         case = await db.get(Case, case_id)
         case_service.touch(case)
         await db.commit()
+
+        # Agent 의 page_count 는 추정치다. 여기서 PDF 를 바로 렌더링해 실측 페이지 수로 바꿔 둔다 —
+        # 카드·전문·현황판이 처음부터 같은 실측값을 보여 주고, 다운로드·발송도 즉시 된다.
+        # 렌더링이 실패하면 추정치를 그대로 두고, 다운로드·발송 시점에 다시 시도한다(그때 카드도 맞춰진다).
+        try:
+            await ensure_pdf(db, case, report)
+        except Exception:
+            log.exception("경위서 PDF 선렌더링 실패: case=%s version=%s", case_id, report.version)
 
         card = await draft_card(db, case_id)
         if card is None:

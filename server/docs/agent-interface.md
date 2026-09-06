@@ -130,7 +130,7 @@ key = os.environ["GEMINI_API_KEY"]
 
 | `kind` | 채울 것 | 비고 |
 |---|---|---|
-| `report` (사건경위서) | `sections` **정확히 4개** (`index` 1~4), `caveat`, `page_count` | PDF 로 만들어진다 |
+| `report` (사건경위서) | `sections` **정확히 4개** (`index` 1~4), `caveat`, `page_count` | PDF 로 만들어진다. `page_count` 는 참고용 — 백엔드가 PDF 를 렌더링해 실측값으로 대체한다 |
 | `rebuttal` (반박의견서) | `body` | 메일 본문으로 그대로 나간다 |
 
 `revision_request` 가 있으면 다시 쓰기다. `previous_sections` 에 이전 원고가 오니 그걸 고친다.
