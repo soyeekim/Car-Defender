@@ -1042,7 +1042,7 @@ class MasterAccidentAgent:
         names: dict[str, str] = {}
         for vehicle in video.vehicles:
             desc = (vehicle.description or "").strip()
-            names[vehicle.id] = "블랙박스 차량" if vehicle.is_ego else (desc[:20] if desc else "상대 차량")
+            names[vehicle.id] = "블랙박스 차량" if vehicle.is_ego else (desc if desc else "상대 차량")
         return names
 
     @classmethod
