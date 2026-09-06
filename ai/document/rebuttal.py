@@ -122,6 +122,34 @@ def _date_label(value: str) -> str:
     return value
 
 
+# 심의문 문장은 마침표 없이 '~사고임', '~결정함' 으로 끝나는 것이 많다
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|(?<=사고임|결정함|판단함|정한다|타당함|인정됨|판단됨|하였음|되었음)\s+")
+
+
+def _first_sentences(text: str, max_chars: int) -> str:
+    """앞에서부터 문장 단위로 max_chars 안팎까지 담는다 — 글자 수로 자르면 '주의하여 회' 처럼 낱말 중간이 잘린다."""
+    text = " ".join(str(text or "").split())
+    if not text:
+        return ""
+    pieces = [piece.strip() for piece in _SENTENCE_SPLIT.split(text) if piece.strip()]
+    kept: list[str] = []
+    for piece in pieces:
+        if kept and len(" ".join(kept + [piece])) > max_chars:
+            break
+        kept.append(piece)
+        if len(" ".join(kept)) >= max_chars:
+            break
+    result = " ".join(kept) if kept else text
+    if len(result) > max_chars * 1.6:
+        # 한 문장이 지나치게 길면 쉼표나 띄어쓰기에서 끊고 말줄임표를 단다
+        cut = result[: int(max_chars * 1.6)]
+        boundary = max(cut.rfind(", "), cut.rfind(" "))
+        if boundary > max_chars // 2:
+            cut = cut[:boundary]
+        result = cut.rstrip(" ,") + "…"
+    return result
+
+
 def build_mail_body(package: VerifiedCasePackage, *, report_attached: bool = False) -> str:
     """본인 가입 보험사 담당자에게 보내는 반박의견서 메일 본문 (합니다체).
 
@@ -149,28 +177,20 @@ def build_mail_body(package: VerifiedCasePackage, *, report_attached: bool = Fal
     lines.append("- 요청 사항: 위 비율을 기준으로 상대 보험사와 재협의해 주시고, 협의가 어려우면 과실비율 분쟁심의위원회 심의 청구를 검토해 주시기 바랍니다.")
     lines.append("")
 
+    # 항목 번호(1./2./3.)가 바뀔 때마다 빈 줄을 두고, 소항목(가./나./다.)도 빈 줄로 나눈다. 당사자 진술 항목은 싣지 않는다 (요청).
     lines.append("2. 주장 근거")
     lines.append("가. 블랙박스 영상에서 확인된 사실")
     facts = _certain(package.verified_facts, limit=4, humanize=humanize)
     if not facts:
         facts = _certain([package.video_summary], limit=1, humanize=humanize)
     lines.extend(f"- {fact}" for fact in facts)
-    statements = _certain(
-        [re.sub(r"\s*\(영상 확인:[^)]*\)\s*$", "", item) for item in package.user_confirmed_facts if not _META_STATEMENT.search(item)],
-        limit=2, humanize=humanize,
-    )
-    if statements:
-        lines.append("나. 당사자 진술")
-        lines.extend(f"- {item}" for item in statements)
-        case_label, factor_label = "다", "라"
-    else:
-        case_label, factor_label = "나", "다"
+    lines.append("")
 
     primary_ids = [str(item) for item in (assessment.get("primary_case_ids") or [])]
     cases = [case for case in package.retrieved_cases if case.get("case_id") in primary_ids]
     cases += [case for case in package.retrieved_cases if case not in cases]
     cases = [case for case in cases if case.get("source_type", "deliberation_case") == "deliberation_case"][:3]
-    lines.append(f"{case_label}. 유사 심의사례")
+    lines.append("나. 유사 심의사례")
     if not cases:
         lines.append("- 인용 가능한 심의사례가 없어 과실비율 인정기준 도표를 기준으로 판단하였습니다.")
     for case in cases:
@@ -183,18 +203,19 @@ def build_mail_body(package: VerifiedCasePackage, *, report_attached: bool = Fal
         elif case.get("basic_ratio"):
             head += f" · 기본비율 {case['basic_ratio']}"
         lines.append(head)
-        description = " ".join(str(case.get("accident_description") or "").split())
+        description = _first_sentences(str(case.get("accident_description") or ""), 240)
         if description:
-            lines.append("  사고 개요: " + description[:160] + ("…" if len(description) > 160 else ""))
+            lines.append("  사고 개요: " + description)
         reasons = _certain([str(item) for item in (case.get("decision_reasons") or [])], limit=2)
         if reasons:
-            lines.append("  심의 이유: " + "; ".join(item[:100] for item in reasons))
+            lines.append("  심의 이유: " + " ".join(_first_sentences(item, 220) for item in reasons))
         matched = [str(item).strip() for item in (case.get("matched_factors") or []) if str(item).strip()][:3]
         if matched:
             lines.append("  본 사고와의 공통점: " + ", ".join(matched))
+    lines.append("")
 
     applied = [item for item in package.adjustment_factors if item.get("applies") and item.get("factor")]
-    lines.append(f"{factor_label}. 과실 수정요소")
+    lines.append("다. 과실 수정요소")
     if applied:
         for item in applied[:4]:
             label = _DIRECTION_LABELS.get(str(item.get("direction") or "").strip(), "")

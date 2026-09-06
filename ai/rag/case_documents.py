@@ -17,7 +17,7 @@ from typing import Iterable, Optional
 from pydantic import BaseModel, Field
 
 from rag.pdf_index import DEFAULT_INDEX_DIR, load_parent_documents
-from state.case_state import CaseMetadata, RetrievedCase
+from state.case_state import CaseMetadata, ChartModifier, ChartVariant, RetrievedCase
 
 _NOISE_LINES = (
     "목차보기",
@@ -47,9 +47,19 @@ _TITLE_PATTERN = re.compile(
 )
 _DECISION = re.compile(r"결정비율[^\n]{0,60}?=\s*(\d{1,3})\s*[:：]\s*(\d{1,3})")
 _BASIC = re.compile(r"기본\s*비율[^\n]{0,40}?=\s*(\d{1,3})\s*[:：]\s*(\d{1,3})")
-_BASIC_STANDARD = re.compile(r"기본\s*과실비율[^\n]{0,80}?(?:A|레드)\s*(\d{1,3})\s*(?:B|블루)\s*(\d{1,3})")
+_BASIC_STANDARD = re.compile(r"기본\s*과실비율[^\n]{0,80}?(?:A|레드)\s*(\d{1,3})\s*[:：]?\s*(?:B|블루)\s*(\d{1,3})")
 _BULLET = re.compile(r"^[•●▪◦\-·]\s*")
 _MODIFIER_LINE = re.compile(r"([+\-±]\s?\d{1,2}0?\s*%?|가산|감산|가감)")
+# 좌표 기반 도표 추출(rag/chart_layout.py)이 내는 줄 형식
+_CHART_HEAD = re.compile(r"^((?:보|거|차)\d+(?:-\d+)?|회전-\d+)\s+(.*)$")
+_ROLE_LINE = re.compile(r"^(A|B):\s*(.*)$")
+_BASIC_LINE = re.compile(r"^기본 과실비율(?: (\([가-힣]\)))? A (\d{1,3}) : B (\d{1,3})$")
+_MODIFIER_ROW = re.compile(r"^- (A|B) (.+?) ([+\-]\d{1,3})$")
+_LEGACY_LINE = re.compile(r"^舊 기준 (.+)$")
+_VARIANT_DESC = re.compile(r"\(([가-힣])\)\s*([^()]*?)(?=\s*\([가-힣]\)|$)")
+_CHART_SECTION = re.compile(
+    r"^(사고\s*상황|기본\s*과실비율\s*해설|기본\s*과실비율|수정요소.*해설|수정요소\(.*|활용시\s*참고\s*사항|관련\s*법규|참고\s*판례|참고\s*사항)$"
+)
 
 
 class CaseDocument(BaseModel):
@@ -78,6 +88,15 @@ class CaseDocument(BaseModel):
     related_cases: list[str] = Field(default_factory=list)
     metadata: CaseMetadata = Field(default_factory=CaseMetadata)
     combined_text: str = ""
+    # 인정기준 도표만: 분류(장·절 제목), A·B 역할, 변형별 기본비율, 구조화된 수정요소, 옛 도표 번호, 해설
+    category: str = ""
+    role_a: str = ""
+    role_b: str = ""
+    chart_variants: list[ChartVariant] = Field(default_factory=list)
+    chart_modifiers: list[ChartModifier] = Field(default_factory=list)
+    legacy_chart_numbers: list[str] = Field(default_factory=list)
+    basic_ratio_explanation: str = ""
+    modifier_explanation: str = ""
 
     def to_retrieved_case(self, *, similarity: float = 0.0, semantic: Optional[float] = None, lexical: Optional[float] = None, excerpt: str = "") -> RetrievedCase:
         return RetrievedCase(
@@ -95,6 +114,11 @@ class CaseDocument(BaseModel):
             decision_reasons=self.decision_reasons or self.decision_basis,
             recognized_facts=self.decision_basis,
             modification_factors=self.modification_factors,
+            role_a=self.role_a,
+            role_b=self.role_b,
+            chart_variants=self.chart_variants,
+            chart_modifiers=self.chart_modifiers,
+            legacy_chart_numbers=self.legacy_chart_numbers,
             source_file=self.source_file,
             source_pages=list(range(self.page_start, self.page_end + 1)),
             similarity=similarity,
@@ -132,6 +156,9 @@ def _split_sections(lines: list[str]) -> dict[str, list[str]]:
             if pattern.match(line):
                 matched = name
                 break
+        if matched in {"accident", "reference", "basic_ratio"} and current == "header":
+            # '사례 개요' 표 안의 라벨들. 표가 시작되기 전(상단 제목·참고기준 상자)에 나온 같은 글자는 라벨이 아니다
+            matched = None
         if matched:
             current = matched
             sections.setdefault(current, [])
@@ -213,10 +240,10 @@ def classify_metadata(title: str, description: str) -> CaseMetadata:
         metadata.road_type = "crosswalk"
     elif any(word in blob for word in ("직선", "동일방향", "동일 방향", "추돌", "진로변경", "차로변경")):
         metadata.road_type = "straight"
-    if any(word in blob for word in ("신호기 있는", "신호등 있", "신호기가 있", "신호 있는")):
-        metadata.signal_present = True
-    elif any(word in blob for word in ("신호기 없는", "신호등 없", "신호기가 없", "신호 없는")):
+    if any(word in blob for word in ("신호기 없는", "신호등 없", "신호기가 없", "신호 없는", "교통정리가 이루어지고 있지 않", "교통정리가 이루어지지 않")):
         metadata.signal_present = False
+    elif any(word in blob for word in ("신호기 있는", "신호등 있", "신호기가 있", "신호 있는", "교통정리가 이루어지고 있는", "신호기에 의해 교통정리")):
+        metadata.signal_present = True
     movement_match = re.search(r"(직진|좌회전|우회전|유턴|후진|차로변경|진로변경|추월|정차|출발)\s*대\s*(직진|좌회전|우회전|유턴|후진|차로변경|진로변경|추월|정차|출발)", blob)
     if movement_match:
         metadata.movement_a, metadata.movement_b = movement_match.group(1), movement_match.group(2)
@@ -246,7 +273,11 @@ def parse_case_parent(parent: dict) -> CaseDocument:
         _join(overview_bullets + sections.get("accident", [])), parent.get("chart_number")
     )
     reference = _strip_layout_noise(_join(sections.get("reference", [])), parent.get("chart_number"))
-    arguments = _join(sections.get("arguments", []))
+    argument_lines = sections.get("arguments", [])
+    arguments = _join(argument_lines)
+    # 좌표 기반 추출(rag/pdf_layout.py)은 두 단을 "[청구인] …" / "[피청구인] …" 줄로 나눠 준다
+    claimant = _join([line[len("[청구인]"):].strip() for line in argument_lines if line.startswith("[청구인]")])
+    respondent = _join([line[len("[피청구인]"):].strip() for line in argument_lines if line.startswith("[피청구인]")])
     modification = _bullets(sections.get("modification", []))
     if not modification:
         modification = [line for line in lines if "수정요소" in line or _MODIFIER_LINE.search(line) and ("가산" in line or "감산" in line)]
@@ -285,6 +316,8 @@ def parse_case_parent(parent: dict) -> CaseDocument:
         accident_description=accident_description,
         reference_standard=reference,
         arguments_text=arguments,
+        claimant_argument=claimant,
+        respondent_argument=respondent,
         evidence=_bullets(sections.get("evidence", [])),
         key_issues=key_issues,
         decision_basis=decision_basis,
@@ -296,21 +329,127 @@ def parse_case_parent(parent: dict) -> CaseDocument:
     )
 
 
+def _variant_descriptions(role_a: str, role_b: str) -> dict[str, str]:
+    """'우측도로에서 직진 (가)동시 (나)선진입' 꼴의 역할 글에서 변형별 설명을 뽑는다 → {'(가)': 'A 동시 / B 동시'}."""
+    out: dict[str, list[str]] = {}
+    for side, text in (("A", role_a), ("B", role_b)):
+        for label, desc in _VARIANT_DESC.findall(text):
+            desc = desc.strip(" ,;")
+            if desc:
+                out.setdefault(f"({label})", []).append(f"{side} {desc}")
+    return {label: " / ".join(parts) for label, parts in out.items()}
+
+
+def _strip_variants(text: str) -> str:
+    return re.sub(r"\s*\([가-힣]\)\s*[^()]*", "", text).strip(" ,") or text.strip()
+
+
+def _chart_sections(lines: list[str]) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current: Optional[str] = None
+    for line in lines:
+        if _CHART_SECTION.match(line) and len(line) <= 42:
+            name = re.sub(r"\s+", "", line)
+            if name.startswith("사고상황"):
+                current = "situation"
+            elif name.startswith("기본과실비율"):
+                current = "basic"
+            elif name.startswith("수정요소"):
+                current = "modifier"
+            elif name.startswith("활용시"):
+                current = "usage"
+            else:
+                current = "other"
+            sections.setdefault(current, [])
+            continue
+        if current:
+            sections[current].append(line)
+    return sections
+
+
 def parse_standard_parent(parent: dict) -> CaseDocument:
     lines = _clean_lines(parent.get("full_text", ""))
     full_text = "\n".join(lines)
     unit_id = parent["unit_key"].split(":", 1)[-1]
+
+    # 좌표 기반 추출(rag/chart_layout.py)의 구조화된 줄: 배지+제목 → A:/B: 역할 → 기본 과실비율 → 수정요소 표 → 舊 기준
+    head_index = next((i for i, line in enumerate(lines) if (m := _CHART_HEAD.match(line)) and m.group(1) == unit_id), None)
     title = ""
-    for line in lines[:15]:
-        if ("사고" in line or "도표" in line) and 6 < len(line) < 100 and not line.startswith("기본"):
-            title = line
-            break
-    basic = _ratio(_BASIC_STANDARD, full_text) or parent.get("decision_ratio")
-    modifiers = [line for line in lines if _MODIFIER_LINE.search(line) and len(line) < 120][:15]
-    description_lines = [line for line in lines[:40] if len(line) > 15][:6]
-    description = " ".join(description_lines)
-    metadata = classify_metadata(title, description)
-    combined = "\n".join(part for part in (title, description, f"기본과실비율 {basic}" if basic else "", "수정요소: " + " / ".join(modifiers[:8]) if modifiers else "") if part)[:3000]
+    category = ""
+    role_a = role_b = ""
+    variants: list[ChartVariant] = []
+    modifiers: list[ChartModifier] = []
+    legacy: list[str] = []
+    body_lines: list[str] = lines
+    if head_index is not None:
+        # 한 상자에 도표 여러 개가 겹쳐 있으면(거43-1~3) 제목에 다음 배지가 이어 붙는다 → 첫 도표 제목만
+        title = re.split(r"\s(?:보|거|차)\d+(?:-\d+)?\s", _CHART_HEAD.match(lines[head_index]).group(2).strip())[0].strip()
+        headings = [line for line in lines[:head_index] if len(line) <= 60 and not _BULLET.match(line)]
+        category = " > ".join(headings[-3:])
+        rest = lines[head_index + 1:]
+        consumed = 0
+        in_table = False
+        for line in rest:
+            if (m := _ROLE_LINE.match(line)):
+                if m.group(1) == "A":
+                    role_a = m.group(2).strip()
+                else:
+                    role_b = m.group(2).strip()
+            elif (m := _BASIC_LINE.match(line)):
+                variants.append(ChartVariant(label=m.group(1) or "", basic_ratio=f"{int(m.group(2))}:{int(m.group(3))}"))
+            elif line == "수정요소 표":
+                in_table = True
+            elif in_table and (m := _MODIFIER_ROW.match(line)):
+                modifiers.append(ChartModifier(side=m.group(1), label=m.group(2).strip(), delta=int(m.group(3))))
+            elif (m := _LEGACY_LINE.match(line)):
+                legacy = [item.strip() for item in m.group(1).split(",") if item.strip()]
+            else:
+                break
+            consumed += 1
+        body_lines = rest[consumed:]
+        descriptions = _variant_descriptions(role_a, role_b)
+        for variant in variants:
+            variant.description = descriptions.get(variant.label, "")
+    if not title:
+        for line in lines[:15]:
+            if ("사고" in line or "도표" in line) and 6 < len(line) < 100 and not line.startswith("기본"):
+                title = line
+                break
+
+    sections = _chart_sections(body_lines)
+    situation_items = [_BULLET.sub("", item).lstrip("⊙ ").strip() for item in sections.get("situation", [])]
+    # 회전교차로 도표는 '적용 조건' 문단(회전교차로 구조 설명)이 먼저 오고 실제 상황은 "구체적인 사고 상황은 …" 에 있다
+    # → 검색·검증 프롬프트가 앞부분만 보므로 실제 상황을 앞으로 옮긴다
+    specific = [item for item in situation_items if item.startswith("구체적인 사고 상황")]
+    if specific:
+        situation_items = specific + [item for item in situation_items if item not in specific]
+    situation = " ".join(situation_items)
+    basic_explanation = " ".join(item.lstrip("⊙ ").strip() for item in sections.get("basic", []))
+    modifier_explanation = " ".join(item.lstrip("⊙ ").strip() for item in sections.get("modifier", []) + sections.get("usage", []))
+    basic = (variants[0].basic_ratio if variants else None) or _ratio(_BASIC_STANDARD, full_text) or parent.get("decision_ratio")
+    modifier_texts = [item.text() for item in modifiers] or [line for line in lines if _MODIFIER_LINE.search(line) and len(line) < 120][:15]
+    if situation:
+        description = situation
+    else:
+        description = " ".join([line for line in lines[:40] if len(line) > 15][:6])
+    prefix = re.match(r"[가-힣]+", unit_id)
+    metadata = classify_metadata(f"{category} {title}", description)
+    if prefix:
+        metadata.accident_target = {"보": "차대보행자", "거": "차대자전거"}.get(prefix.group(0), "차대차")
+    roles_text = " / ".join(part for part in ((f"A: {role_a}" if role_a else ""), (f"B: {role_b}" if role_b else "")) if part)
+    combined = "\n".join(
+        part
+        for part in (
+            f"도표 {unit_id} {title}".strip(),
+            category,
+            roles_text,
+            f"사고 상황: {situation}" if situation else description,
+            " / ".join(f"기본 과실비율{(' ' + v.label) if v.label else ''} {v.basic_ratio}" for v in variants) if variants else (f"기본과실비율 {basic}" if basic else ""),
+            "수정요소: " + " / ".join(modifier_texts[:12]) if modifier_texts else "",
+            f"舊 기준 {', '.join(legacy)}" if legacy else "",
+        )
+        if part
+    )[:3000]
     return CaseDocument(
         case_id=unit_id,
         parent_id=parent["parent_id"],
@@ -320,14 +459,23 @@ def parse_standard_parent(parent: dict) -> CaseDocument:
         page_start=int(parent.get("page_start", 1)),
         page_end=int(parent.get("page_end", 1)),
         title=title or f"과실비율 인정기준 도표 {unit_id}",
-        accident_type=title.split(" - ")[0].strip() if title else None,
+        accident_type=(category.split(" > ")[-1].strip() if category else None) or title or None,
         chart_number=parent.get("chart_number") or unit_id,
         decision_ratio=None,
         basic_ratio=basic,
         accident_description=description,
-        modification_factors=modifiers,
+        decision_reasons=[item for item in (basic_explanation, modifier_explanation) if item],
+        modification_factors=modifier_texts[:15],
         metadata=metadata,
         combined_text=combined,
+        category=category,
+        role_a=role_a,
+        role_b=role_b,
+        chart_variants=variants,
+        chart_modifiers=modifiers,
+        legacy_chart_numbers=legacy,
+        basic_ratio_explanation=basic_explanation,
+        modifier_explanation=modifier_explanation,
     )
 
 

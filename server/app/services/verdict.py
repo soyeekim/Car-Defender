@@ -37,6 +37,27 @@ async def merge_facts(db: AsyncSession, case_id: str, updates: dict) -> None:
     await db.commit()
 
 
+async def sync_opponent_claim(db: AsyncSession, case_id: str, claim: dict | None) -> Verdict | None:
+    """대화에서 상대 보험사 주장 비율이 (새로) 나오면 활성 판정과 그 판정 카드에 반영한다.
+
+    판정은 다시 하지 않는다 — 주장은 사실이 아니라 비교 대상이다. 카드는 같은 id 로 `message.updated` 가 나간다."""
+    verdict = await case_service.active_verdict(db, case_id)
+    if verdict is None or not isinstance(claim, dict) or claim.get("mine") is None or claim.get("other") is None:
+        return None
+    normalized = {"mine": int(claim["mine"]), "other": int(claim["other"])}
+    if verdict.opponent_claim == normalized:
+        return verdict
+    verdict.opponent_claim = normalized
+    await db.commit()
+    stmt = select(Message).where(Message.case_id == case_id, Message.type == "verdict").order_by(Message.id.desc())
+    for card in (await db.execute(stmt)).scalars().all():
+        if (card.payload or {}).get("verdictId") == verdict.id:
+            await case_service.update_message(db, card, verdict_payload(verdict))
+            break
+    await case_service.publish_case_updated(db, case_id)
+    return verdict
+
+
 async def perform_verdict(db: AsyncSession, case_id: str) -> Verdict:
     case = await db.get(Case, case_id)
     analysis = await db.get(Analysis, case_id)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from agent.presenters import fact_chips
 from state.case_state import CaseState, Message
 
 SCHEMA_VERSION = 1
@@ -78,6 +79,8 @@ def readable_facts(state: CaseState) -> dict[str, Any]:
         "user_facts": [fact.fact[:120] for fact in state.user_confirmed_facts[-8:]],
         "unconfirmed": [item[:120] for item in state.uncertain_facts[:6]],
         "similar_case_ids": [case.case_id for case in state.retrieved_cases[:3]],
+        # 사건 현황판 '확인된 사실' 칩 — 백엔드가 GET /cases/{id} 의 facts 로 그대로 내려준다
+        "fact_chips": fact_chips(state),
     }
     if state.fault_assessment is not None:
         summary["fault_ratio"] = {"mine": state.fault_assessment.fault_ratio.user, "other": state.fault_assessment.fault_ratio.opponent}

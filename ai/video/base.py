@@ -15,7 +15,7 @@ from settings import VideoSettings, get_settings
 from telemetry import CallMetrics, RunLogger, get_run_logger
 from video.frame_sampler import compute_video_hash, probe_duration
 from video.schemas import AnalysisPassRecord, VideoObservation, VideoResult
-from video.validation import FocusTarget, evaluate_video_completion
+from video.validation import FocusTarget, evaluate_video_completion, reconcile_vehicle_inventory
 
 ProgressCallback = Optional[Callable[[str], None]]
 
@@ -227,6 +227,8 @@ class BaseVideoAnalyzer:
             result.ego_vehicle_id = result.dashcam_vehicle_id()
         if pass_type == "focus" and previous_result is not None and not result.vehicles:
             result.vehicles = [item.model_copy(deep=True) for item in previous_result.vehicles]
+        # 서술에는 있는데 목록에 빠진 차량을 같은 결과 안에서 보정한다 (추가 호출 없이 한 번의 분석을 온전하게)
+        reconcile_vehicle_inventory(result)
         result.analysis_completion = evaluate_video_completion(
             result,
             threshold=self.settings.collision_pair_confidence_threshold,

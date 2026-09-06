@@ -84,6 +84,15 @@ class VideoSettings:
     enable_cache: bool = True
     cache_dir: Path = DATA_DIR / "cache" / "video"
     frames_dir: Path = DATA_DIR / "cache" / "frames"
+    # focus 재분석 구간 자르기: 충돌 시각 기준으로 잘라 보낸다. 충돌 순간(차량·부위 확인)은 앞뒤 1초,
+    # 과실 요소(방향지시등·차선·진입 순서·제동) 확인은 충돌 4초 전부터 1초 후까지 — 그 사실들은 충돌 몇 초 전에 보인다
+    clip_focus_window: bool = True
+    clip_min_duration_sec: float = 0.0
+    clip_impact_pre_roll_sec: float = 1.0
+    clip_impact_post_roll_sec: float = 1.0
+    clip_factor_pre_roll_sec: float = 4.0
+    clip_factor_post_roll_sec: float = 1.0
+    clips_dir: Path = DATA_DIR / "cache" / "clips"
 
 
 @dataclass
@@ -94,7 +103,7 @@ class AgentSettings:
     document_temperature: float = 0.2
     recent_message_window: int = 8
     max_questions_per_turn: int = 1
-    max_fact_question_rounds: int = 2
+    max_fact_question_rounds: int = 3
     max_review_rounds: int = 3
     max_master_rechecks: int = 0
     max_critical_rechecks: int = 1
@@ -163,6 +172,13 @@ def build_settings() -> Settings:
         enable_cache=_env_bool("VIDEO_RESULT_CACHE", True),
         cache_dir=Path(_env("VIDEO_CACHE_DIR", str(DATA_DIR / "cache" / "video"))),
         frames_dir=Path(_env("FRAME_CACHE_DIR", str(DATA_DIR / "cache" / "frames"))),
+        clip_focus_window=_env_bool("VIDEO_CLIP_FOCUS", True),
+        clip_min_duration_sec=_env_float("VIDEO_CLIP_MIN_DURATION", 0.0),
+        clip_impact_pre_roll_sec=_env_float("VIDEO_CLIP_IMPACT_PRE_ROLL", 1.0),
+        clip_impact_post_roll_sec=_env_float("VIDEO_CLIP_IMPACT_POST_ROLL", 1.0),
+        clip_factor_pre_roll_sec=_env_float("VIDEO_CLIP_FACTOR_PRE_ROLL", 4.0),
+        clip_factor_post_roll_sec=_env_float("VIDEO_CLIP_FACTOR_POST_ROLL", 1.0),
+        clips_dir=Path(_env("VIDEO_CLIP_CACHE_DIR", str(DATA_DIR / "cache" / "clips"))),
     )
     agent = AgentSettings(
         master_model=_env("MASTER_AGENT_MODEL", "gpt-4.1", "REASONING_MODEL", "INTAKE_MODEL") or "gpt-4.1",
@@ -171,7 +187,7 @@ def build_settings() -> Settings:
         document_temperature=_env_float("DOCUMENT_AGENT_TEMPERATURE", 0.2),
         recent_message_window=_env_int("RECENT_MESSAGE_WINDOW", 8),
         max_questions_per_turn=max(1, _env_int("MAX_QUESTIONS_PER_TURN", 1)),
-        max_fact_question_rounds=max(0, _env_int("MAX_FACT_QUESTION_ROUNDS", 2)),
+        max_fact_question_rounds=max(0, _env_int("MAX_FACT_QUESTION_ROUNDS", 3)),
         max_review_rounds=max(0, _env_int("MAX_REVIEW_ROUNDS", 3)),
         # 2차 분석(gap fill)이 1차 직후 이미 수행되므로 대화 중 Agent 재분석은 기본 0회.
         # 사용자가 "영상 다시 확인해줘"라고 명시하거나 충돌 차량 식별 같은 critical 공백은 별도로 허용된다.

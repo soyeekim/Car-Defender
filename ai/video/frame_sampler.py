@@ -79,6 +79,37 @@ def probe_duration(video_path: str | Path, ffmpeg: Optional[str] = None) -> Opti
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
+_COMPLETE_MARKER = ".complete"
+
+
+def _completed_frames(directory: Path) -> list[Path]:
+    """추출이 끝까지 마쳐진 디렉터리의 프레임 목록.
+
+    ffmpeg 가 중간에 죽거나 프로세스가 끊기면 프레임 몇 장만 남는다. 예전에는 파일이 하나라도 있으면 그대로 썼기 때문에
+    그 뒤로는 매번 앞부분 몇 장만 모델에 보내는 문제가 있었다. 지금은 추출을 마친 뒤에 쓰는 마커(프레임 개수)가 있고
+    실제 파일 수가 그 개수와 같을 때만 재사용한다. 그 외(마커 없음·개수 불일치·0장)는 빈 목록을 돌려줘 다시 뽑게 한다."""
+    marker = directory / _COMPLETE_MARKER
+    if not directory.is_dir() or not marker.is_file():
+        return []
+    try:
+        expected = int(marker.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return []
+    frames = sorted(directory.glob("frame_*.jpg"))
+    if expected <= 0 or len(frames) != expected:
+        return []
+    return frames
+
+
+def _clear_partial_frames(directory: Path) -> None:
+    """중단된 추출의 조각(프레임·마커)만 지운다. 디렉터리 자체나 다른 파일은 건드리지 않는다."""
+    if not directory.is_dir():
+        return
+    for stale in directory.glob("frame_*.jpg"):
+        stale.unlink(missing_ok=True)
+    (directory / _COMPLETE_MARKER).unlink(missing_ok=True)
+
+
 def _frames_dir(video_hash: str, interval_sec: float, start_sec, end_sec, max_width: int) -> Path:
     base = get_settings().video.frames_dir
     tag = f"{video_hash[:12]}_i{interval_sec:g}_s{start_sec if start_sec is not None else 'all'}_e{end_sec if end_sec is not None else 'all'}_w{max_width}"
@@ -114,8 +145,10 @@ def sample_frames(
     directory = Path(output_dir) if output_dir else _frames_dir(digest, interval_sec, start_sec, end_sec, max_width)
     start = max(0.0, float(start_sec)) if start_sec is not None else 0.0
 
-    existing = sorted(directory.glob("frame_*.jpg")) if directory.is_dir() else []
+    existing = _completed_frames(directory)
     if not existing:
+        # 마커가 없거나 개수가 맞지 않으면 이전 추출이 끝까지 가지 못한 것이다 → 조각을 지우고 처음부터 다시 뽑는다
+        _clear_partial_frames(directory)
         directory.mkdir(parents=True, exist_ok=True)
         command = [binary, "-y", "-hide_banner", "-loglevel", "error"]
         if start_sec is not None:
@@ -139,6 +172,8 @@ def sample_frames(
         if completed.returncode != 0:
             raise RuntimeError(f"ffmpeg 프레임 추출 실패: {completed.stderr.strip()[:500]}")
         existing = sorted(directory.glob("frame_*.jpg"))
+        # 추출이 정상 종료된 뒤에만 마커를 남긴다. 위에서 예외가 나면 마커가 없으므로 다음 호출이 다시 뽑는다
+        (directory / _COMPLETE_MARKER).write_text(str(len(existing)), encoding="utf-8")
 
     frames = []
     for index, frame_path in enumerate(existing[:max_frames]):

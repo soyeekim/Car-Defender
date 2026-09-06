@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from common.jsonutil import compact_json
 from models.clients import TextClient
 from prompts.loader import load_prompt
+from settings import get_settings
 from state.case_state import CaseState, MissingInformation, Question
 from state.updater import get_slot
 from telemetry import RunLogger, get_run_logger
@@ -130,11 +131,20 @@ def video_already_confirmed_topic(state: CaseState, text: str) -> bool:
     return any(keyword.lower() in blob for keyword in keywords)
 
 
-def classify_video_topic(state: CaseState, question: Question) -> tuple[str, Optional[RecheckTarget]]:
-    """guardrail 분류: ask(사용자에게 물음) | recheck(영상 재분석) | drop(영상이 이미 확인함)."""
+# 사고 정황(상대 차량이 어느 쪽에서 와서 어떻게 움직였는지)은 영상 agent 의 몫이다 — 영상이 못 봤다고 사용자에게 진행 방향을 묻지 않는다
+# (사용자 요청 2026-09-06: 상대 차량 식별은 물어도 되지만 방향·경로는 묻지 말 것)
+_NEVER_ASK_USER = re.compile(r"(진행\s*방향|진입\s*방향|진행\s*경로|어느\s*(방향|쪽)에서|어떻게\s*(진행|움직|주행)|직진,?\s*좌회전,?\s*우회전)")
+
+
+def classify_video_topic(state: CaseState, question: Question, *, max_rechecks: Optional[int] = None) -> tuple[str, Optional[RecheckTarget]]:
+    """guardrail 분류: ask(사용자에게 물음) | recheck(영상 재분석) | drop(영상이 이미 확인함 / 사용자에게 물을 성격이 아님).
+
+    max_rechecks: 대화 중 허용된 영상 재분석 횟수(Master Agent 설정). 없으면 전역 설정값."""
     if not state.video_analyzed or not state.video_path:
         return "ask", None
     text = f"{question.question} {question.why or ''}"
+    if _NEVER_ASK_USER.search(question.question) and question.field not in {"collision.participants_confirmed", "other_vehicle.vehicle_id", "ego_vehicle.vehicle_id"}:
+        return "drop", None
     topic = video_observable_topic(text)
     if topic is None:
         return "ask", None
@@ -145,11 +155,15 @@ def classify_video_topic(state: CaseState, question: Question) -> tuple[str, Opt
     focus = f"{topic}을(를) 충돌 직전 구간에서 집중 확인하라."
     if recheck_already_done(state, focus):
         return "ask", None
+    budget = max_rechecks if max_rechecks is not None else get_settings().agent.max_master_rechecks
+    if state.video_reanalysis_count >= budget:
+        # 재분석 예산이 없으면(기본 0) '재분석'으로 보내도 실행되지 않고 질문만 사라진다 → 사용자에게 묻는다
+        return "ask", None
     return "recheck", RecheckTarget(focus=focus, why=question.why or topic)
 
 
-def must_recheck_video_instead(state: CaseState, question: Question) -> Optional[RecheckTarget]:
-    decision, target = classify_video_topic(state, question)
+def must_recheck_video_instead(state: CaseState, question: Question, *, max_rechecks: Optional[int] = None) -> Optional[RecheckTarget]:
+    decision, target = classify_video_topic(state, question, max_rechecks=max_rechecks)
     return target if decision == "recheck" else None
 
 
@@ -225,6 +239,37 @@ def question_is_duplicate(state: CaseState, question: str, *, threshold: float =
     return False
 
 
+_VEHICLE_FIELD = re.compile(r"^(?:vehicles\.)?(vehicle_(\d+)|ego|self|my_vehicle|user_vehicle|other|opponent|other_vehicle|ego_vehicle)\.([a-z_]+)$")
+
+
+def normalize_field(state: CaseState, field: Optional[str]) -> Optional[str]:
+    """LLM이 고른 field 이름을 Case State 슬롯 경로로 맞춘다.
+
+    영상 스키마 식으로 'vehicles.vehicle_2.turn_signal' 이라고 쓰면 그대로는 슬롯이 없어 질문이 조용히 버려졋다.
+    상대 차량 ID면 other_vehicle.<leaf>, 블랙박스 차량 ID면 ego_vehicle.<leaf> 로 바꾸고,
+    그래도 슬롯이 없으면 'review.<leaf>' 로 바꿔 질문 자체는 살린다 (프롬프트 규칙: 슬롯이 없으면 review.* 를 쓴다)."""
+    if not field:
+        return field
+    field = field.strip()
+    if get_slot(state, field) is not None or field.startswith("review.") or field in DEFAULT_QUESTIONS:
+        return field
+    match = _VEHICLE_FIELD.match(field)
+    if match:
+        who, number, leaf = match.group(1), match.group(2), match.group(3)
+        ego_id = state.ego_vehicle.vehicle_id or "vehicle_1"
+        other_id = state.other_vehicle.vehicle_id
+        if who in {"ego", "self", "my_vehicle", "user_vehicle", "ego_vehicle"} or (number and f"vehicle_{number}" == ego_id and who != other_id):
+            side = "ego_vehicle"
+        else:
+            side = "other_vehicle"
+        candidate = f"{side}.{leaf}"
+        if get_slot(state, candidate) is not None or candidate in DEFAULT_QUESTIONS:
+            return candidate
+        return f"review.{side}_{leaf}"
+    leaf = field.rsplit(".", 1)[-1]
+    return f"review.{leaf}" if leaf else field
+
+
 def field_is_askable(state: CaseState, field: Optional[str], question: Optional[str] = None) -> bool:
     """Agent가 고른 field가 유효하고 아직 확정/질문되지 않았는지 (변형 이름·유사 문장 포함)."""
     if not field:
@@ -270,7 +315,8 @@ def mark_pending_unknown(state: CaseState, message: str) -> list[str]:
     marked = []
     for question in list(state.pending_questions):
         note = f"사용자가 {question.field}에 대해 모른다고 답함"
-        if note not in state.uncertain_facts:
+        # '추가 정황 있나요?' 같은 열린 질문(review.*)에 '없어요'라고 한 것은 미확인 사실이 아니다
+        if note not in state.uncertain_facts and not question.field.startswith("review."):
             state.uncertain_facts.append(note)
         if question.field not in state.asked_fields:
             state.asked_fields.append(question.field)
@@ -353,11 +399,13 @@ def recheck_history_text(state: CaseState) -> str:
     return "\n".join(f"- {item}" for item in state.recheck_focus_history) or "(없음)"
 
 
-def split_video_rechecks(state: CaseState, questions: list[Question], rechecks: list[RecheckTarget]) -> tuple[list[Question], list[RecheckTarget]]:
-    """guardrail: 화면에 찍히는 사실을 묻는 질문은 재분석 요청으로 옮긴다."""
+def split_video_rechecks(
+    state: CaseState, questions: list[Question], rechecks: list[RecheckTarget], *, max_rechecks: Optional[int] = None
+) -> tuple[list[Question], list[RecheckTarget]]:
+    """guardrail: 화면에 찍히는 사실을 묻는 질문은 재분석 요청으로 옮긴다 (재분석 예산이 있을 때만; 없으면 사용자에게 묻는다)."""
     kept: list[Question] = []
     for question in questions:
-        decision, target = classify_video_topic(state, question)
+        decision, target = classify_video_topic(state, question, max_rechecks=max_rechecks)
         if decision == "drop":
             continue  # 영상이 이미 확인한 사실 — 물을 필요 없음
         if decision == "recheck" and target is not None:
@@ -388,6 +436,8 @@ def generate_followup_questions(
     intro_default: Optional[str] = None,
     allow_agent_choice: bool = True,
     use_llm_intro: bool = True,
+    max_rechecks: Optional[int] = None,
+    rechecks_unavailable: bool = False,
 ) -> tuple[str, list[Question], list[RecheckTarget]]:
     """다음 행동을 Agent가 스스로 추론해서 고른다: 영상 재분석 요청 또는 사용자 질문 하나.
 
@@ -420,6 +470,11 @@ def generate_followup_questions(
             asked_fields=asked_fields_text(state),
             video_summary=(state.video_analysis.short_summary if state.video_analysis else "(영상 분석 결과 없음)"),
             max_questions=max_questions,
+            recheck_availability=(
+                "이번 턴에는 영상 재분석을 할 수 없다(재분석 예산 소진). (A) 항목은 미확인으로 두고, (B) 항목이 있으면 반드시 하나를 질문으로 낸다."
+                if rechecks_unavailable or (max_rechecks is not None and state.video_reanalysis_count >= max_rechecks)
+                else "영상 재분석 요청 가능."
+            ),
         )
         try:
             response = client.generate_json(system=system.text, user=user, schema=_LLMQuestions, task=task.task)
@@ -433,12 +488,18 @@ def generate_followup_questions(
                 metrics=response.metrics,
                 extra={"reasoning": generated.reasoning, "chosen": [q.field for q in generated.questions], "rechecks": [t.focus for t in generated.video_recheck_targets], "forced": forced.field if forced else None},
             )
+            dropped: list[str] = []
             for item in generated.questions:
-                if not field_is_askable(state, item.field, item.question) or not is_objective_question(item.question):
+                field = normalize_field(state, item.field)
+                if not field_is_askable(state, field, item.question) or not is_objective_question(item.question):
+                    dropped.append(f"{item.field}→{field}")
                     continue
-                if item.field in {q.field for q in questions}:
+                if field in {q.field for q in questions}:
                     continue
-                questions.append(Question(field=item.field, question=item.question.strip(), importance=item.importance, why=(item.why or "").strip() or None, reasoning=list(generated.reasoning)))
+                questions.append(Question(field=field, question=item.question.strip(), importance=item.importance, why=(item.why or "").strip() or None, reasoning=list(generated.reasoning)))
+            if dropped:
+                # 질문이 조용히 사라지면 대화가 갑자기 판정으로 넘어간다 → 왜 버렸는지 로그에 남긴다
+                logger.log(agent="master_agent", task=task.task, case_id=state.case_id, extra={"dropped_questions": dropped, "kept": [q.field for q in questions]})
             rechecks = [target for target in generated.video_recheck_targets if target.focus.strip()]
             if use_llm_intro:
                 intro = generated.intro.strip() or intro
@@ -471,7 +532,7 @@ def generate_followup_questions(
     # guardrail: 화면에 찍히는 사실은 사용자에게 묻지 않고 영상 재분석으로 보낸다 (critical 항목은 제외)
     forced_questions = [q for q in questions if forced is not None and q.field == forced.field]
     other_questions = [q for q in questions if not (forced is not None and q.field == forced.field)]
-    other_questions, rechecks = split_video_rechecks(state, other_questions, rechecks)
+    other_questions, rechecks = split_video_rechecks(state, other_questions, rechecks, max_rechecks=max_rechecks)
     questions = forced_questions + other_questions
 
     questions = questions[:max_questions]

@@ -11,6 +11,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from assessment.chart_calculator import assess_with_chart, is_chart
 from common.jsonutil import compact_json
 from models.clients import TextClient
 from prompts.loader import load_prompt
@@ -149,6 +150,43 @@ def _enforce_anchor(assessment: FaultAssessment, anchor: Optional[RetrievedCase]
 
 
 _USER_RATIO_MENTION = re.compile(r"(?:나|사용자|본인)\s*(?:\([^)]*\))?\s*(?:차량)?\s*(\d{1,3})\s*[:：]\s*(?:상대(?:방|측)?)\s*(?:차량)?\s*(\d{1,3})")
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+DEVIATION_MARKER = "기준으로 삼되"
+
+
+def _explain_anchor_deviation(assessment: FaultAssessment, anchor: Optional[RetrievedCase]) -> FaultAssessment:
+    """기준 사례의 비율과 다르게 판단했으면 그 사실을 첫 문장으로 명시한다:
+    '가장 비슷한 심의사례 X의 결정비율 A:B를 기준으로 삼되, (이유) 때문에 (방향) 나 U : 상대 O로 봤어요.'
+    모델이 영상·진술 근거로 적용한 수정요소가 조정 이유가 된다 (사용자 요청 2026-09-06: 사례를 참고하되 왜 다르게 봤는지 밝힐 것)."""
+    if anchor is None or anchor.source_type != "deliberation_case" or not assessment.anchor_ratio:
+        return assessment
+    parsed = parse_ratio(assessment.anchor_ratio)
+    current = (assessment.fault_ratio.user, assessment.fault_ratio.opponent)
+    if parsed is None or current == parsed:
+        return assessment
+    applied = [item for item in assessment.adjustment_factors if item.applies and item.factor.strip()]
+    if not applied:
+        return assessment
+    reasons = ", ".join(item.factor.strip().rstrip(".") for item in applied[:3])
+    direction = "내 과실을 낮춰" if current[0] < parsed[0] else "내 과실을 높여"
+    label = "결정" if anchor.decision_ratio else "기본"
+    sentence = (
+        f"가장 비슷한 심의사례 {anchor.case_id}의 {label}비율 {assessment.anchor_ratio}을 {DEVIATION_MARKER}, "
+        f"{reasons} 때문에 {direction} 나 {current[0]} : 상대 {current[1]}로 봤어요."
+    )
+    if DEVIATION_MARKER in assessment.explanation:
+        return assessment
+    # 모델의 표준 첫 문장("가장 비슷한 심의사례 …를 기준으로 보면 … 예상돼요")은 같은 말이므로 코드 문장으로 바꾼다
+    sentences = _SENTENCE_SPLIT.split(assessment.explanation.strip()) if assessment.explanation.strip() else []
+    if sentences and sentences[0].startswith("가장 비슷한 심의사례"):
+        sentences = sentences[1:]
+    assessment.explanation = " ".join([sentence] + sentences).strip()
+    # 코드 guardrail 안내([방향 보정] 등)가 있으면 그 뒤에 둔다
+    position = 0
+    while position < len(assessment.reasoning_summary) and assessment.reasoning_summary[position].startswith("["):
+        position += 1
+    assessment.reasoning_summary.insert(position, f"[기준 사례와 조정] {sentence}")
+    return assessment
 
 
 def _enforce_direction(assessment: FaultAssessment) -> FaultAssessment:
@@ -184,11 +222,25 @@ def _sync_explanation_ratio(assessment: FaultAssessment) -> FaultAssessment:
     return assessment
 
 
-def _validate(assessment: FaultAssessment, retrieved_cases: list[RetrievedCase], *, provisional: bool) -> FaultAssessment:
+NO_REFERENCE_PREFIX = "꼭 맞는 심의사례나 인정기준 도표를 찾지 못해서 일반 원칙으로만 본 임시 예상치예요."
+
+
+def _validate(assessment: FaultAssessment, retrieved_cases: list[RetrievedCase], *, provisional: bool, enforce_anchor: bool = True) -> FaultAssessment:
     allowed = {item.case_id for item in retrieved_cases}
     assessment.fault_ratio = _normalize_ratio(assessment.fault_ratio)
     assessment = _enforce_direction(assessment)
-    assessment = _enforce_anchor(assessment, select_anchor_case(retrieved_cases))
+    for factor in assessment.adjustment_factors:
+        # 모델이 영상·진술 근거로 '적용'한 수정요소는 그대로 둔다 — 기준 사례에서 벗어나는 모델의 추론을 살린다 (사용자 요청 2026-09-06).
+        # 출처가 없거나(rag) 모델 스스로 미적용으로 둔 항목 가운데 '가능성·불명확' 표현이 있는 것만 미적용으로 정리한다.
+        blob = f"{factor.factor} {factor.note}".lower()
+        if any(marker in blob for marker in _UNVERIFIED_MARKERS) and not (factor.applies and factor.source in {"video", "user"}):
+            factor.applies = False
+            if factor.direction != "unknown":
+                factor.note = (factor.note + " " if factor.note else "") + "(확인 불가로 미적용)"
+    anchor = select_anchor_case(retrieved_cases)
+    if enforce_anchor:
+        assessment = _enforce_anchor(assessment, anchor)
+        assessment = _explain_anchor_deviation(assessment, anchor)
     assessment.most_likely = assessment.fault_ratio.as_text()
     assessment.possible_range = _normalize_range(assessment.possible_range)
     assessment.primary_case_ids = [case_id for case_id in assessment.primary_case_ids if case_id in allowed]
@@ -207,13 +259,6 @@ def _validate(assessment: FaultAssessment, retrieved_cases: list[RetrievedCase],
     if not assessment.primary_case_ids and assessment.matched_cases:
         assessment.primary_case_ids = [assessment.matched_cases[0].case_id]
         assessment.matched_cases[0].role = "primary"
-    for factor in assessment.adjustment_factors:
-        # 확인되지 않은 수정요소는 '적용'으로 두지 않는다 (가이드: UNKNOWN 요소는 uncertainties로만)
-        blob = f"{factor.factor} {factor.note}".lower()
-        if any(marker in blob for marker in _UNVERIFIED_MARKERS):
-            factor.applies = False
-            if factor.direction != "unknown":
-                factor.note = (factor.note + " " if factor.note else "") + "(확인 불가로 미적용)"
     assessment.confidence = max(0.0, min(1.0, assessment.confidence))
     if provisional:
         assessment.assessment_type = "provisional"
@@ -266,9 +311,18 @@ def assess_fault_ratio(
     if client is None:
         return deterministic_assessment(state, cases, reason="text client 없음")
 
+    anchor = select_anchor_case(cases)
+    if anchor is not None and is_chart(anchor):
+        # 심의사례가 없어 인정기준 도표가 기준인 경우: agent 가 도표·역할·수정요소 행을 고르고 코드가 계산한다
+        chart_assessment = assess_with_chart(client, state, cases, run_logger=logger)
+        if chart_assessment is not None:
+            if not preconditions.ok:
+                chart_assessment.uncertainties = list(dict.fromkeys(chart_assessment.uncertainties + [f"판정 전제 조건 미충족: {', '.join(preconditions.missing)}"]))
+            return _validate(chart_assessment, cases, provisional=provisional, enforce_anchor=False)
+        provisional = True  # 도표를 사건의 나·상대에 대응시키지 못함 → 일반 경로를 임시 판정으로
+
     system = load_prompt("master_agent", "system")
     task = load_prompt("master_agent", "fault_assessment")
-    anchor = select_anchor_case(cases)
     anchor_reference = (
         {
             "case_id": anchor.case_id,
@@ -309,4 +363,14 @@ def assess_fault_ratio(
 
     if not preconditions.ok:
         assessment.uncertainties = list(dict.fromkeys(assessment.uncertainties + [f"판정 전제 조건 미충족: {', '.join(preconditions.missing)}"]))
+    if not cases:
+        # 참고 기준이 하나도 없으면 사례 번호를 인용할 수 없고, 결과는 항상 임시 판정이다
+        provisional = True
+        assessment.anchor_case_id = None
+        assessment.anchor_ratio = None
+        assessment.primary_case_ids = []
+        assessment.matched_cases = []
+        assessment.confidence = min(assessment.confidence, 0.4)
+        if NO_REFERENCE_PREFIX not in assessment.explanation:
+            assessment.explanation = f"{NO_REFERENCE_PREFIX} {assessment.explanation}".strip()
     return _validate(assessment, cases, provisional=provisional)

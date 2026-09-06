@@ -45,13 +45,17 @@ def test_service_contract_end_to_end(tmp_path):
     assert response.stage == "FACT_COLLECTING"
 
     response = service.chat(case_id, "내 차 블랙박스야")
-    assert response.action == "SHOW_SIMILAR_CASES"
-    assert response.stage == "CASE_REVIEW"
-    for _ in range(4):
-        response = service.chat(case_id, "상대는 깜빡이 안 켰어. 내가 먼저 들어가 있었어.")
+    assert response.action == "ASK_USER"
+    for _ in range(6):
         if response.action == "SHOW_FAULT_ASSESSMENT":
             break
-    assert response.action == "SHOW_FAULT_ASSESSMENT"
+        if response.data.get("offer_assessment"):
+            response = service.chat(case_id, "예상 과실비율 판정해줘")
+        elif response.data.get("open_question"):
+            response = service.chat(case_id, "없어요")
+        else:
+            response = service.chat(case_id, "상대는 깜빡이 안 켰어. 내가 먼저 들어가 있었어.")
+    assert response.action == "SHOW_FAULT_ASSESSMENT", response.message
     assert response.data["fault_assessment"]["fault_ratio"] == {"user": 30, "opponent": 70}
 
     assessment = service.assess_fault(case_id)

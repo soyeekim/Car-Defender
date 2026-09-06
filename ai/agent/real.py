@@ -142,6 +142,10 @@ class RealAgent:
 
         next_action = "none"
         reply = response.message
+        # 판정이 이미 있는데 이번 턴에 상대 보험사 주장 비율이 새로 들어왔으면, 카드에 비교로 붙는다는 것을 알려 준다
+        claim_after = parse_opponent_claim(state.opponent_claim, facts.get("opponent_claim"))
+        if inp.verdict is not None and claim_after and claim_after != facts.get("opponent_claim") and response.action not in {"REQUEST_ASSESSMENT", "REQUEST_DOCUMENT"}:
+            reply = f"상대 보험사 주장({ratio_text(claim_after['mine'], claim_after['other'])})을 판정 카드에 함께 표시했어요.\n" + reply
         if response.action == "REQUEST_ASSESSMENT":
             next_action = "rejudge" if inp.verdict is not None else "verdict"
         elif response.action == "REQUEST_DOCUMENT":
@@ -197,9 +201,12 @@ class RealAgent:
                 state, revision_request=inp.revision_request, previous_sections=sections_to_dict(inp.previous_sections),
             )
             sections = report_sections_for_server(document.sections)
+            for section in sections:
+                # 문서도 문장마다 줄을 나눠 화면에서 읽기 쉽게 (PDF·프론트는 줄바꿈을 그대로 보여준다)
+                section["body"] = readable_lines(section.get("body", "")) or ""
             return {
                 "sections": sections,
-                "caveat": (document.caveat or "").strip() or None,
+                "caveat": readable_lines((document.caveat or "").strip()) or None,
                 "page_count": estimate_page_count(sections),
             }
         document = document_agent.generate_rebuttal_opinion(
@@ -208,8 +215,8 @@ class RealAgent:
             revision_request=inp.revision_request,
             previous_sections=sections_to_dict(inp.previous_sections),
         )
-        body = compose_mail_body(document, max_chars=MAIL_BODY_MAX_CHARS)
-        return {"body": body}
+        body = readable_lines(compose_mail_body(document, max_chars=MAIL_BODY_MAX_CHARS)) or ""
+        return {"body": body[:MAIL_BODY_MAX_CHARS]}
 
     # ------------------------------------------------------------------ contract: explain (선택)
     def explain(self, inp) -> dict[str, Any]:

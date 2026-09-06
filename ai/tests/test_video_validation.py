@@ -88,6 +88,24 @@ def test_merge_records_pair_change_and_new_vehicle_note():
     assert any("vehicle_4" in note for note in merged.uncertain_facts)
 
 
+def test_reconcile_registers_vehicle_written_only_in_summary():
+    from video.schemas import VehicleEntry, VideoResult
+    from video.validation import reconcile_vehicle_inventory
+
+    video = VideoResult(
+        short_summary="블랙박스 차량(vehicle_1)이 직진 중 대향 차로에서 좌회전하던 흰색 세단(vehicle_2)과 충돌한 사고입니다.",
+        vehicles=[VehicleEntry(id="vehicle_1", description="블랙박스 촬영 차량", is_ego=True)],
+        ego_vehicle_id="vehicle_1",
+    )
+    assert reconcile_vehicle_inventory(video) == ["vehicle_2"]
+    assert [vehicle.id for vehicle in video.vehicles] == ["vehicle_1", "vehicle_2"] and video.vehicles[1].description == "흰색 세단"
+    assert video.collision_pair.participants == ["vehicle_1", "vehicle_2"] and video.collision_pair.confidence >= 0.8
+    assert reconcile_vehicle_inventory(video) == []  # 두 번 부르면 아무것도 더하지 않는다
+    # ID 없이 언급된 차량은 보정할 수 없다 → 그대로
+    plain = VideoResult(short_summary="블랙박스 차량이 흰색 세단과 충돌", vehicles=[VehicleEntry(id="vehicle_1", is_ego=True)], ego_vehicle_id="vehicle_1")
+    assert reconcile_vehicle_inventory(plain) == [] and len(plain.vehicles) == 1
+
+
 def test_user_confirmation_question_is_objective(tmp_path):
     result = _result(pair_confidence=0.5)
     question = user_confirmation_question(result)

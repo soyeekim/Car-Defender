@@ -219,7 +219,9 @@ class FakeTextClient:
     def _master_intent(self, user: str) -> dict:
         message = _user_message(user)
         intent = "provide_facts"
-        if re.search(r"어떻게 해야|방법|뭐야\??|뭔가요", message):
+        if "주장" in message and re.search(r"\d", message):
+            intent = "provide_opponent_claim"
+        elif re.search(r"어떻게 해야|방법|뭐야\??|뭔가요", message):
             intent = "general_question"
         elif "경위서" in message:
             intent = "request_incident_report"
@@ -387,6 +389,34 @@ class FakeTextClient:
             "ratio_dependencies": ["상대 차량 적색 신호가 확인되면 상대 과실 증가"],
             "explanation": f"가장 비슷한 심의사례 {primary}의 결정비율을 기준으로 보면 나 {user_ratio} : 상대 {opponent_ratio} 정도의 과실비율이 예상돼요. 상대 차량 신호가 확인되면 달라질 수 있어요.",
         }
+
+    def _master_chart_assessment(self, user: str) -> dict:
+        """인정기준 도표 경로: 도표·역할·수정요소 행만 고른다 (숫자 계산은 코드). chart_selection 속성으로 덮어쓸 수 있다."""
+        import re as _re
+
+        preset = getattr(self, "chart_selection", None)
+        if preset:
+            return preset
+        ids = _re.findall(r'"chart_id":\s*"([^"]+)"', user)
+        return {
+            "chart_id": ids[0] if ids else "",
+            "variant": None,
+            "user_is": "A",
+            "orientation_reason": "사용자 차량의 진행이 도표 A 차량과 같아요.",
+            "applied_modifiers": [],
+            "rejected_modifiers": [{"id": "m1", "reason": "영상에서 확인되지 않음"}],
+            "confidence": 0.7,
+            "uncertainties": ["상대 차량 신호 확인 불가"],
+            "ratio_dependencies": ["상대 차량 신호가 확인되면 달라질 수 있음"],
+            "explanation_facts": ["영상에서 사용자 차량이 직진 중이었던 것이 확인됐어요."],
+        }
+
+    def _master_fact_labels(self, user: str) -> dict:
+        """번호 매긴 사실 목록을 앞 5개까지 12자 라벨로 줄인 척한다 (+ 잘못된 index 하나, 평가어 하나 → 코드가 거른다)."""
+        facts = re.findall(r"^(\d+)\. (.+)$", user, re.MULTILINE)
+        labels = [{"index": int(index), "label": text[:12].strip()} for index, text in facts[:5]]
+        labels += [{"index": 99, "label": "없는 사실"}, {"index": 1, "label": "상대 과실 큼"}]
+        return {"labels": labels}
 
     def _master_respond(self, user: str) -> dict:
         return {"message": "현재 사건 정보를 기준으로 답변드립니다. 영상에서 확인된 사실과 사용자 진술을 구분하여 기록했습니다.", "follow_up_needed": False}

@@ -1,16 +1,16 @@
 {
-  "fingerprint": "275a7be225d8447dc460b0fa9f8370d37e76c873c0c2146289a7c0c0616cb4f0",
-  "index_version": 4,
+  "fingerprint": "5f4ec81c79e9d6ec59c68e05bc0ed15140e1f897f45052ce895b38b2f7c1d280",
+  "index_version": 6,
   "index_strategy": "parent_child_hybrid",
   "embedding_model": "text-embedding-3-small",
-  "parent_count": 436,
-  "child_count": 2903,
-  "chunk_count": 2903,
+  "parent_count": 474,
+  "child_count": 2701,
+  "chunk_count": 2701,
   "embedding_dimensions": 1536,
   "source_files": [
-    "/home/sohee/project/FIn AI Challenge/data/text/(최종)과실비율심의사례_(54MB).pdf",
-    "/home/sohee/project/FIn AI Challenge/data/text/230630_자동차사고 과실비율 인정기준_최종.pdf",
-    "/home/sohee/project/FIn AI Challenge/data/text/250624_2차로형 회전교차로사고 과실비율 비정형기준.pdf"
+    "/home/sohee/project/Car-Defender-Test/ai/data/text/(최종)과실비율심의사례_(54MB).pdf",
+    "/home/sohee/project/Car-Defender-Test/ai/data/text/230630_자동차사고 과실비율 인정기준_최종.pdf",
+    "/home/sohee/project/Car-Defender-Test/ai/data/text/250624_2차로형 회전교차로사고 과실비율 비정형기준.pdf"
   ],
   "max_chars": 2200,
   "min_chars": 80

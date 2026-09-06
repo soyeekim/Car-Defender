@@ -178,6 +178,13 @@ class MissingInformation(BaseModel):
     video_recheckable: bool = False
 
 
+class FactLabel(BaseModel):
+    """사건 현황판 칩 라벨 — 영상 확정 사실 문장을 줄인 것 (근거 문장을 함께 보관)."""
+
+    label: str
+    fact: str = ""
+
+
 class Question(BaseModel):
     field: str
     question: str
@@ -220,6 +227,25 @@ class CaseRelevance(BaseModel):
     note: str = ""
 
 
+class ChartModifier(BaseModel):
+    """인정기준 도표의 수정요소 행: 어느 쪽(A/B)의 과실을 얼마나(±) 조정하는지."""
+
+    side: Literal["A", "B"] = "A"
+    label: str
+    delta: int
+
+    def text(self) -> str:
+        return f"{self.side} {self.label} {self.delta:+d}"
+
+
+class ChartVariant(BaseModel):
+    """도표 안의 변형 ((가) 동시진입 / (나) 선진입 …). 변형마다 기본비율이 다르다."""
+
+    label: str
+    description: str = ""
+    basic_ratio: str
+
+
 class RetrievedCase(BaseModel):
     case_id: str
     source_type: Literal["deliberation_case", "fault_standard", "roundabout_special_standard"] = "deliberation_case"
@@ -235,6 +261,12 @@ class RetrievedCase(BaseModel):
     decision_reasons: list[str] = Field(default_factory=list)
     recognized_facts: list[str] = Field(default_factory=list)
     modification_factors: list[str] = Field(default_factory=list)
+    # 인정기준 도표(fault_standard 계열)만: A·B 역할 정의, 변형별 기본비율, 구조화된 수정요소 행, 옛 도표 번호
+    role_a: str = ""
+    role_b: str = ""
+    chart_variants: list[ChartVariant] = Field(default_factory=list)
+    chart_modifiers: list[ChartModifier] = Field(default_factory=list)
+    legacy_chart_numbers: list[str] = Field(default_factory=list)
     source_file: Optional[str] = None
     source_pages: list[int] = Field(default_factory=list)
     similarity: float = 0.0
@@ -306,6 +338,7 @@ class FaultAssessment(BaseModel):
     anchor_case_id: Optional[str] = Field(default=None, description="기준값으로 삼은 가장 유사한 심의사례")
     anchor_ratio: Optional[str] = Field(default=None, description="기준값 (user:opponent)")
     anchor_enforced: bool = Field(default=False, description="확인된 수정요소가 없어 코드가 기준값으로 되돌렸는지")
+    calculation: Optional[str] = Field(default=None, description="인정기준 도표로 계산했을 때의 계산식 (기본비율 ± 적용 수정요소 → 최종)")
     primary_case_ids: list[str] = Field(default_factory=list)
     core_facts: list[str] = Field(default_factory=list)
     matched_cases: list[MatchedCaseSummary] = Field(default_factory=list)
@@ -370,6 +403,7 @@ class CaseState(BaseModel):
     video_reanalysis_count: int = 0
     critical_recheck_count: int = Field(default=0, description="충돌 차량 식별 등 critical 공백 때문에 수행한 재분석 횟수")
     recheck_focus_history: list[str] = Field(default_factory=list, description="Agent가 요청해 수행한 영상 focus 재분석 쟁점")
+    video_fact_labels: list[FactLabel] = Field(default_factory=list, description="영상 확정 사실을 현황판 칩용으로 줄인 라벨")
     missing_information: list[MissingInformation] = Field(default_factory=list)
     pending_questions: list[Question] = Field(default_factory=list)
     asked_fields: list[str] = Field(default_factory=list)
@@ -385,6 +419,7 @@ class CaseState(BaseModel):
     fact_question_rounds: int = Field(default=0, description="심의사례 검색 전 Agent가 스스로 고른 질문 횟수")
     review_answers: dict[str, str] = Field(default_factory=dict, description="review.* 질문에 대한 사용자 답변")
     pending_intent: Optional[str] = Field(default=None, description="질문 답변 후 이어서 수행할 사용자 요청 (예: request_incident_report)")
+    assessment_offer_pending: bool = Field(default=False, description="사실 수집을 마치고 '예상 과실비율을 판정해 드릴까요?' 제안을 띄운 상태")
     fault_assessment: Optional[FaultAssessment] = None
     assessment_invalidated: bool = False
     assessment_invalidation_reasons: list[str] = Field(default_factory=list)

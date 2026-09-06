@@ -163,6 +163,7 @@ async def load_bundle(db: AsyncSession, case_id: str) -> CaseBundle:
         rebuttal=await get_rebuttal(db, case_id),
         active_job=await active_job(db, case_id),
         sent_at=await last_sent_at(db, case_id),
+        analysis=await get_analysis(db, case_id),
     )
 
 

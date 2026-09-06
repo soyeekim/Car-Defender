@@ -19,6 +19,7 @@ from case.questions import (
     asked_fields_text,
     field_is_askable,
     is_objective_question,
+    normalize_field,
     recheck_history_text,
     split_video_rechecks,
 )
@@ -33,7 +34,7 @@ from telemetry import RunLogger, get_run_logger
 ADDITIONAL_FACTS_FIELD = "review.additional_facts"
 _ADDITIONAL_FACTS_QUESTION = (
     "심의사례와 비교해 추가로 알려주실 사고 정황이 있나요? (예: 상대 차량 방향지시등, 진입 순서, 영상 시작 전 상황) "
-    "없으면 '없어요' 또는 '판정해줘'라고 말씀해 주세요."
+    "없으면 '없어요' 또는 '예상 과실비율 판정해줘'라고 말씀해 주세요."
 )
 
 # LLM 실패 시 fallback: 첫 턴 질문(questions.VIDEO_GAP_RULES)과 같은 표를 쓴다. 화면에 찍히는 항목은 재분석으로 간다.
@@ -102,6 +103,7 @@ def generate_case_review_questions(
     *,
     max_questions: int = 1,
     run_logger: Optional[RunLogger] = None,
+    max_rechecks: Optional[int] = None,
 ) -> tuple[str, list[Question], list[RecheckTarget]]:
     """심의사례 검토: (요약, 사용자 질문 ≤ max, 영상 재분석 요청). 질문은 pending으로 등록한다."""
     logger = run_logger or get_run_logger()
@@ -118,6 +120,9 @@ def generate_case_review_questions(
                 max_chars=14000,
             ),
             uncertain_facts="\n".join(f"- {item}" for item in state.uncertain_facts[:12]) or "(없음)",
+            confirmed_facts="\n".join(
+                f"- {fact.fact}" for fact in (state.video_confirmed_facts() + state.user_confirmed_facts)[:16]
+            ) or "(없음)",
             recheck_history=recheck_history_text(state),
             asked_fields=asked_fields_text(state),
             max_questions=max_questions,
@@ -136,6 +141,7 @@ def generate_case_review_questions(
             )
             llm_questions = []
             for item in output.questions:
+                item.field = normalize_field(state, item.field) or item.field
                 if not item.field or not is_objective_question(item.question) or _already_known(state, item.field):
                     continue
                 if not field_is_askable(state, item.field, item.question):
@@ -157,7 +163,7 @@ def generate_case_review_questions(
             logger.log(agent="master_agent", task=task.task, case_id=state.case_id, extra={"error": str(exc)[:300], "fallback": "deterministic_review_questions"})
 
     # guardrail: 화면에 찍히는 사실은 사용자에게 묻지 않고 재분석으로 보낸다
-    questions, rechecks = split_video_rechecks(state, questions, rechecks)
+    questions, rechecks = split_video_rechecks(state, questions, rechecks, max_rechecks=max_rechecks)
     questions = questions[:max_questions]
     if llm_decided and not questions and state.review_rounds > 0:
         # 이미 구체적 검토 질문을 했고 Agent도 더 물을 것이 없다고 판단 → 판정 단계로

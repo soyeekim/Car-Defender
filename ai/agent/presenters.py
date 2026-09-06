@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from assessment.fault_ratio import parse_ratio
 from case.questions import format_questions
+from common.korean_text import repair_spacing
 from common.timeutil import parse_timestamp
 from document.grounding import SECTION_TITLES
 from document.incident_report import INCIDENT_SECTIONS
@@ -148,7 +149,10 @@ def question_card(question: Question, *, first: bool = False) -> str:
 
 
 # 문장이 끝나는 자리(…요. / …다. / ? / !) 뒤의 공백. 숫자 뒤 마침표("1. 항목", "0.85")와 괄호 안("…해요.)")은 문장 끝으로 보지 않는다.
-_SENTENCE_BREAK = re.compile(r"(?<=[가-힣A-Za-z)\]\"'”’…][.!?])[ \t]+(?=[가-힣A-Z(\"'“‘\d])")
+# 항목 기호("가. 영상 사실", "A. …")의 마침표는 문장 끝이 아니다 → 공백 뒤 한 글자 + 마침표 꼴은 자르지 않는다
+_SENTENCE_BREAK = re.compile(
+    r"(?<=[가-힣A-Za-z)\]\"'”’…][.!?])(?<!\s[가-힣A-Za-z][.!?])(?<!^[가-힣A-Za-z][.!?])[ \t]+(?=[가-힣A-Z(\"'“‘\d])", re.MULTILINE
+)
 
 
 def readable_lines(text: Optional[str]) -> Optional[str]:
@@ -193,14 +197,24 @@ def parse_opponent_claim(text: Optional[str], stored: Optional[dict[str, Any]] =
         return candidate_stored
     match = re.search(r"(?:나|본인|제|내)\s*(?:차량?)?\s*(\d{1,3})\s*(?:[:：대]|,|\s)\s*(?:상대(?:방|측)?|저쪽)\s*(?:차량?)?\s*(\d{1,3})", text)
     if match:
-        mine, other = int(match.group(1)), int(match.group(2))
-        if mine + other == 100:
-            return {"mine": mine, "other": other}
+        pair = _claim_pair(int(match.group(1)), int(match.group(2)))
+        if pair:
+            return pair
     for line in text.splitlines()[::-1]:
         ratio = parse_ratio(line)
-        if ratio and sum(ratio) == 100:
-            return {"mine": ratio[0], "other": ratio[1]}
+        pair = _claim_pair(*ratio) if ratio else None
+        if pair:
+            return pair
     return candidate_stored
+
+
+def _claim_pair(mine: int, other: int) -> Optional[dict[str, int]]:
+    """'50:50' 은 그대로, '5:5'·'7:3' 같은 10 단위 축약은 50:50·70:30 으로 읽는다. 합이 100(또는 10)이 아니면 비율이 아니다."""
+    if mine + other == 100:
+        return {"mine": mine, "other": other}
+    if mine + other == 10:
+        return {"mine": mine * 10, "other": other * 10}
+    return None
 
 
 def _humanize_reason(reason: str) -> str:
@@ -242,7 +256,11 @@ def judge_summary(assessment: FaultAssessment, state: CaseState) -> str:
     if assessment.assessment_type == "provisional":
         lines.append("아직 확인되지 않은 사실이 있어서 임시 예상치예요.")
     if state.rag_tier == "fault_standard":
-        lines.append("꼭 맞는 심의사례가 없어서 과실비율 인정기준 도표를 근거로 계산했어요.")
+        lines.append("꼭 맞는 심의사례가 없어서 과실비율 인정기준 도표의 기본비율에 확인된 수정요소를 더하고 빼서 계산했어요.")
+        if assessment.calculation:
+            lines.append("계산: " + assessment.calculation)
+    elif state.rag_tier == "none" and "찾지 못해서" not in explanation:
+        lines.append("꼭 맞는 심의사례나 인정기준 도표를 찾지 못해서 일반 원칙으로만 본 임시 예상치예요.")
     if assessment.uncertainties:
         lines.append("아직 확실하지 않은 점: " + "; ".join(_clean_item(item) for item in assessment.uncertainties[:2]) + ".")
     if assessment.ratio_dependencies:
@@ -295,6 +313,7 @@ def precedent_title(case: RetrievedCase) -> str:
 # 팝업 본문의 제목 줄. 프론트는 이 목록에 있는 문단을 소제목으로 그릴 수 있다 (precedent-image-spec.md)
 PRECEDENT_SECTION_LABELS = (
     "사고 유형", "사고 내용", "쟁점", "과실비율", "심의 이유", "적용 수정요소", "참고 인정기준", "기본 과실비율", "수정요소",
+    "차량 역할", "적용 변형", "계산 과정",
     "내 사건과 비슷한 점", "내 사건과 다른 점", "판정에서의 역할",
 )
 _RATIO_ONLY_LINE = re.compile(r"^\s*(청구|피청구|A|B)\s*차량?\s*\d{1,3}\s*%")
@@ -303,27 +322,14 @@ _SENTENCE_END = re.compile(r"(사고임|사례임|결정함|판단함|고려함|
 _NARRATIVE_END = re.compile(r"(사고임|사고로|사고이므로|사고임\.|사고\.)$")
 
 
-# PDF 줄바꿈 자리에서 단어가 "사 고로서", "도 표", "우 측도로"처럼 끊겨 나온다. 자주 쓰이는 낱말 안의 공백만 붙인다.
-_DOMAIN_WORDS = (
-    "사고 도표 진로 우측 좌측 차량 교차로 신호 직진 좌회전 우회전 피청구 청구 과실 비율 안전지대 후행 선행 진입 충돌 충격 통과 상황 결정 "
-    "직후 회전 변경 차로 정지 서행 확인 판단 고려 기본 수정 요소 위반 신뢰 운전 주의 의무 방향 도로 횡단 보행자 추돌 접촉 정차 주차 후진 "
-    "출발 개시 완료 적용 산정 인정 심의 사례 지점 현장 약도 동태 회피 신호기 사거리 삼거리 점멸 황색 적색 녹색 방향지시등 감속 일시정지 선진입 후진입"
-).split()
-_SPLIT_WORD = re.compile("|".join(sorted({f"{w[:i]} {w[i:]}" for w in _DOMAIN_WORDS for i in range(1, len(w))}, key=len, reverse=True)))
-_DANGLING_PARTICLE = re.compile(r"(?<=[가-힣]) (을|를|로|의|에|와|과|도|가|은|는|에서|으로|에게|까지|부터)(?=[ ,.;)]|$)")
-
-
 def _clean_case_text(text: str, chart_number: Optional[str] = None) -> str:
-    """PDF 2단 레이아웃에서 본문 사이에 낀 '참고 / 인정기준 / 도표번호' 조각과 줄바꿈 잔재를 지운다."""
+    """PDF 2단 레이아웃에서 본문 사이에 낀 '참고 / 인정기준 / 도표번호' 조각과 줄바꿈 잔재("사 고로서", "의무 가")를 지운다."""
     cleaned = " " + text.replace("\n", " ") + " "
     cleaned = cleaned.replace(" 참고 ", " ").replace(" 인정기준 ", " ").replace("●", " ")
     if chart_number:
         # 본문에 낀 도표 번호 조각만 지운다. "도표 252-4" 처럼 더 긴 번호의 일부는 남긴다
         cleaned = re.sub(rf"(?<![\d(\-])\s{re.escape(chart_number)}(?![\d)\-])", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    cleaned = _SPLIT_WORD.sub(lambda m: m.group(0).replace(" ", ""), cleaned)
-    cleaned = _DANGLING_PARTICLE.sub(r"\1", cleaned)
-    return cleaned.strip(" .;")
+    return repair_spacing(cleaned).strip(" .;")
 
 
 def _sentences(text: str, chart_number: Optional[str] = None) -> list[str]:
@@ -393,18 +399,22 @@ def precedent_body_text(case: RetrievedCase, assessment: Optional[FaultAssessmen
         if chart:
             paragraphs += ["참고 인정기준", f"도표 {chart}"]
     else:
-        head = "과실비율 인정기준 도표" + (f" {chart}" if chart else "")
+        head = ("회전교차로 비정형기준 도표" if case.source_type == "roundabout_special_standard" else "과실비율 인정기준 도표") + (f" {chart}" if chart else "")
         paragraphs.append(head)
         if case.title:
             paragraphs += ["사고 유형", case.title.strip()]
+        if case.role_a or case.role_b:
+            paragraphs += ["차량 역할", f"A: {case.role_a or '(미상)'}", f"B: {case.role_b or '(미상)'}"]
         description = _sentences(case.accident_description or case.excerpt or "", chart)
         if description:
-            paragraphs += ["사고 내용", *description[:2]]
-        if case.basic_ratio:
-            paragraphs += ["기본 과실비율", case.basic_ratio]
-        factors = [_clean_case_text(item, chart).lstrip("● ").strip() for item in case.modification_factors if item.strip()]
+            paragraphs += ["사고 내용", *description[:3]]
+        if len(case.chart_variants) > 1:
+            paragraphs += ["적용 변형", *[f"{item.label} {item.description} → 기본 A:B = {item.basic_ratio}".strip() for item in case.chart_variants]]
+        elif case.basic_ratio:
+            paragraphs += ["기본 과실비율", f"A:B = {case.basic_ratio}"]
+        factors = [item.text() for item in case.chart_modifiers] or [_clean_case_text(item, chart).lstrip("● ").strip() for item in case.modification_factors if item.strip()]
         if factors:
-            paragraphs += ["수정요소", *factors[:8]]
+            paragraphs += ["수정요소", *factors[:12]]
     # 사례 내용 다음에 "내 사건과 무엇이 같고 다른가"를 항목별로 붙인다 (리랭커가 '항목: 내용' 꼴로 써 준다)
     relevance = case.relevance
     if relevance:
@@ -416,7 +426,11 @@ def precedent_body_text(case: RetrievedCase, assessment: Optional[FaultAssessmen
             paragraphs += ["내 사건과 다른 점", *different[:3]]
     if assessment is not None:
         ratio = case.decision_ratio or case.basic_ratio
-        if assessment.anchor_case_id == case.case_id:
+        if assessment.anchor_case_id == case.case_id and case.source_type != "deliberation_case":
+            if assessment.calculation:
+                paragraphs += ["계산 과정", assessment.calculation]
+            role = "내 사건에 가장 맞는 인정기준 도표예요. 이 도표의 기본비율에 영상·진술로 확인된 수정요소를 더하고 빼서 예상 과실비율을 계산했어요."
+        elif assessment.anchor_case_id == case.case_id:
             role = "가장 비슷한 사례예요. " + (f"이 사례의 결정비율 {ratio}을 " if ratio else "이 사례의 비율을 ") + "기준값으로 삼아 내 사건의 예상 과실비율을 계산했어요."
         elif case.case_id in assessment.primary_case_ids:
             role = "판정 근거로 함께 참고한 사례예요."
@@ -438,20 +452,24 @@ def build_chart(state: CaseState, assessment: FaultAssessment, cases: list[Retri
     """판정 카드의 '근거 도표' 한 줄."""
     anchor = next((case for case in cases if case.case_id == assessment.anchor_case_id), cases[0] if cases else None)
     standard = next((case for case in cases if case.source_type != "deliberation_case"), None)
+    # 프론트가 이 줄을 "인정기준 도표 — {name}" 으로 그리므로 name 에 '인정기준 도표'를 다시 쓰지 않는다
     if standard is not None and (anchor is None or anchor.source_type != "deliberation_case"):
-        name = "인정기준 도표"
-        if standard.chart_number:
-            name += f" {standard.chart_number}"
-        if standard.title:
-            name += f" — {standard.title[:40]}"
-        note = f"기본 과실비율 {standard.basic_ratio}" if standard.basic_ratio else "사고 유형별 기본 비율을 정해 둔 표"
+        chart = anchor if anchor is not None and anchor.source_type != "deliberation_case" else standard
+        name = " · ".join(part for part in ((chart.chart_number or "").strip(), (chart.title or "")[:40].strip()) if part) or "인정기준 도표"
+        if assessment.calculation:
+            note = assessment.calculation
+        else:
+            note = f"기본 과실비율 A:B = {chart.basic_ratio}" if chart.basic_ratio else "사고 유형별 기본 비율을 정해 둔 표"
         return {"name": name[:120], "note": note[:200]}
     if anchor is None:
-        return {"name": "유사 심의사례 없음 · 일반 기준", "note": "꼭 맞는 사례가 없어서 일반 기준으로 계산했어요"}
+        return {"name": "참고 기준 없음 · 일반 원칙", "note": "꼭 맞는 심의사례나 인정기준 도표를 찾지 못해서 일반 원칙으로만 본 임시 예상치예요"}
     name = (anchor.accident_type or anchor.title or f"심의사례 {anchor.case_id}").strip()
     if anchor.chart_number:
-        name = f"인정기준 도표 {anchor.chart_number} · {name}"
-    note = f"가장 비슷한 심의사례 {anchor.case_id}의 {'결정' if anchor.decision_ratio else '기본'}비율 {anchor.decision_ratio or anchor.basic_ratio or '(미상)'}을 기준값으로 삼았어요"
+        name = f"{anchor.chart_number} · {name}"
+    note = (
+        f"심의사례 {anchor.case_id}가 적용한 인정기준 도표예요. "
+        f"이 사례의 {'결정' if anchor.decision_ratio else '기본'}비율 {anchor.decision_ratio or anchor.basic_ratio or '(미상)'}을 기준값으로 삼았어요"
+    )
     if assessment.anchor_enforced:
         note += " · 확인된 수정요소가 없어서 그대로 적용했어요"
     return {"name": name[:120], "note": note[:200]}
@@ -515,3 +533,167 @@ def report_sections_for_server(sections: dict[str, str]) -> list[dict[str, Any]]
 def estimate_page_count(sections: list[dict[str, Any]]) -> int:
     total = sum(len(item.get("body") or "") for item in sections)
     return max(1, math.ceil(total / 1400))
+
+
+# ----------------------------------------------------------------------------- 확인된 사실 칩 (사건 현황판)
+
+_LANE_RE = re.compile(r"lane[_ ]?(\d)|(\d)\s*차로")
+_SPEED_RE = re.compile(r"(\d{1,3})\s*(?:km|킬로)", re.IGNORECASE)
+_CHIP_MOVEMENT = {**_MOVEMENT_LABELS, "lane_change_left": "차로 변경", "lane_change_right": "차로 변경"}
+_CHIP_ENTRY = {
+    "left_side_road": "좌측 진입", "right_side_road": "우측 진입", "opposite": "맞은편 진입", "same_direction_front": "같은 방향 앞",
+    "same_direction_behind": "같은 방향 뒤", "same_direction": "같은 방향", "left": "좌측 진입", "right": "우측 진입", "front": "맞은편 진입",
+}
+_CHIP_SIGNAL = {"red": "적색 신호", "green": "녹색 신호", "yellow": "황색 신호", "flashing_yellow": "황색 점멸", "flashing_red": "적색 점멸"}
+_CHIP_PART = {
+    "front": "전면", "rear": "후면", "left_side": "좌측면", "right_side": "우측면", "front_left": "좌측 앞", "front_right": "우측 앞",
+    "rear_left": "좌측 뒤", "rear_right": "우측 뒤", "side": "측면",
+}
+_CHIP_COLLISION = {**_COLLISION_LABELS, "side_swipe": "측면 접촉"}
+_CHIP_SPEED_QUALITATIVE = {"slow": "서행", "normal": "정속 주행", "fast": "빠른 속도", "stopped": "정지 상태"}
+_PENDING_RULES = [
+    (("방향지시등", "깜빡이"), "상대 방향지시등 확인 필요"), (("정지선",), "정지선 통과 확인 필요"), (("실선", "점선", "차선"), "차선 종류 확인 필요"),
+    (("선진입", "진입 순서", "먼저 진입"), "진입 순서 확인 필요"), (("제동", "브레이크", "감속"), "제동 여부 확인 필요"), (("신호",), "상대 신호 확인 필요"),
+]
+
+
+def _video_confirmed(slot) -> bool:
+    return slot is not None and slot.is_known() and slot.status == "CONFIRMED" and str(slot.source) == "video"
+
+
+def _lane_label(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    text = str(value).lower()
+    match = _LANE_RE.search(text)
+    if match:
+        return f"{match.group(1) or match.group(2)}차로"
+    if "inner" in text or "내측" in text:
+        return "내측 차로"
+    if "outer" in text or "외측" in text:
+        return "외측 차로"
+    return ""
+
+
+_CHIP_INTERSECTION = {"four_way": "사거리 교차로", "three_way": "삼거리 교차로", "t_intersection": "삼거리 교차로"}
+_SIGNAL_COLOR_RE = re.compile(r"(flashing_yellow|flashing_red|green_arrow|green|yellow|red)", re.IGNORECASE)
+
+
+def _signal_chip(value: Optional[str]) -> Optional[str]:
+    """슬롯 값은 'vehicle_1 진행방향: yellow @00:04.0' 처럼 방향·시각이 붙어 있다 → 색 토큰만 뽑는다. 점멸이면 점멸로."""
+    if not value:
+        return None
+    text = str(value).lower()
+    match = _SIGNAL_COLOR_RE.search(text)
+    if not match:
+        return None
+    color = match.group(1)
+    if ("점멸" in text or "flash" in text) and color in {"yellow", "red"}:
+        color = f"flashing_{color}"
+    return _CHIP_SIGNAL.get(color)
+
+
+def slot_chips(state: CaseState) -> list[dict[str, str]]:
+    """영상에서 CONFIRMED 로 확인된 슬롯 값만 짧은 라벨로. LLM 없이 슬롯 값으로만 만든다."""
+    items: list[dict[str, str]] = []
+
+    def add(label: str, field: str) -> None:
+        label = label.strip()
+        if label and all(item["label"] != label for item in items):
+            items.append({"label": label[:16], "source": "video", "field": field})
+
+    ego, other, road, collision = state.ego_vehicle, state.other_vehicle, state.road, state.collision
+    if _video_confirmed(road.road_type):
+        add(_label_fuzzy(road.road_type.value, _ROAD_LABELS, _ROAD_PATTERNS), "road.road_type")
+    if _video_confirmed(road.intersection_type) and str(road.road_type.value or "").lower() not in {"roundabout", "회전교차로"}:
+        intersection = _CHIP_INTERSECTION.get(str(road.intersection_type.value).lower())
+        if intersection:
+            items[:] = [item for item in items if not (item["field"] == "road.road_type" and item["label"] == "교차로")]  # '교차로' 보다 구체적인 라벨로 대체
+            add(intersection, "road.intersection_type")
+    if _video_confirmed(ego.movement):
+        movement = _label_fuzzy(ego.movement.value, _CHIP_MOVEMENT, _MOVEMENT_PATTERNS)
+        lane = _lane_label(ego.lane.value) if _video_confirmed(ego.lane) else ""
+        add(f"{lane} {movement}".strip() if movement else lane, "ego_vehicle.movement")
+    if _video_confirmed(other.entry_direction):
+        entry = _CHIP_ENTRY.get(str(other.entry_direction.value).lower())
+        if entry:
+            add(f"상대 {entry}", "other_vehicle.entry_direction")
+    if _video_confirmed(other.movement):
+        movement = _label_fuzzy(other.movement.value, _CHIP_MOVEMENT, _MOVEMENT_PATTERNS)
+        lane = _lane_label(other.lane.value) if _video_confirmed(other.lane) else ""
+        if movement:
+            add(f"상대 {lane} {movement}".replace("  ", " "), "other_vehicle.movement")
+    if _video_confirmed(road.signal_present):
+        add("신호등 있음" if str(road.signal_present.value).lower() in {"true", "yes", "present"} else "신호등 없음", "road.signal_present")
+    if _video_confirmed(ego.signal) or _video_confirmed(road.signal_state):
+        signal = _signal_chip(ego.signal.value if _video_confirmed(ego.signal) else road.signal_state.value)
+        if signal:
+            add(f"내 {signal}", "ego_vehicle.signal" if _video_confirmed(ego.signal) else "road.signal_state")
+    if _video_confirmed(other.signal):
+        signal = _signal_chip(other.signal.value)
+        if signal:
+            raw = str(other.signal.value).lower()
+            add(f"상대 {signal}" + (" (위반)" if "red" in raw and "flash" not in raw and "점멸" not in raw else ""), "other_vehicle.signal")
+    if _video_confirmed(other.turn_signal):
+        value = str(other.turn_signal.value).lower()
+        add("상대 방향지시등 미점등" if value in {"none", "false", "off"} else "상대 방향지시등 점등", "other_vehicle.turn_signal")
+    if _video_confirmed(road.lane_marking):
+        value = str(road.lane_marking.value).lower()
+        if "dash" in value or "점선" in value:
+            add("점선 구간", "road.lane_marking")
+        elif "solid" in value or "실선" in value:
+            add("실선 구간", "road.lane_marking")
+    if _video_confirmed(ego.estimated_speed):
+        raw = str(ego.estimated_speed.value)
+        match = _SPEED_RE.search(raw)
+        if match:
+            add(f"약 {match.group(1)}km/h", "ego_vehicle.estimated_speed")
+        elif raw.lower() in _CHIP_SPEED_QUALITATIVE:
+            add(_CHIP_SPEED_QUALITATIVE[raw.lower()], "ego_vehicle.estimated_speed")
+    for vehicle, prefix, field in ((ego, "내 차", "ego_vehicle.entered_first"), (other, "상대", "other_vehicle.entered_first")):
+        if _video_confirmed(vehicle.entered_first) and str(vehicle.entered_first.value).lower() in {"true", "first", "already_in"}:
+            add(f"{prefix} 선진입", field)
+    if _video_confirmed(ego.braking) and str(ego.braking.value).lower() in {"true", "braking_before_impact", "braked"}:
+        add("내 차 제동", "ego_vehicle.braking")
+    if _video_confirmed(collision.type):
+        add(_label_fuzzy(collision.type.value, _CHIP_COLLISION, _COLLISION_PATTERNS), "collision.type")
+    if _video_confirmed(collision.ego_collision_part):
+        part = _CHIP_PART.get(str(collision.ego_collision_part.value).lower())
+        if part:
+            add(f"내 차 {part}", "collision.ego_collision_part")
+    if _video_confirmed(collision.other_collision_part):
+        part = _CHIP_PART.get(str(collision.other_collision_part.value).lower())
+        if part:
+            add(f"상대 차 {part}", "collision.other_collision_part")
+    return items
+
+
+def _similar_label(label: str, others: list[str]) -> bool:
+    compact = label.replace(" ", "")
+    for other in others:
+        other_compact = other.replace(" ", "")
+        if compact == other_compact or (len(compact) >= 4 and (compact in other_compact or other_compact in compact)):
+            return True
+    return False
+
+
+def fact_chips(state: CaseState) -> dict[str, Any]:
+    """사건 현황판 '확인된 사실' 칩. 영상에서 CONFIRMED 로 확인된 슬롯 값 + 영상 확정 사실 문장을 줄인 라벨(state.video_fact_labels)을
+    합쳐 최대 10개, 영상으로 확인하지 못한 과실 요소는 '확인 필요' 칩으로 덧붙인다."""
+    items = slot_chips(state)
+    for entry in state.video_fact_labels:
+        label = entry.label.strip()
+        if label and not _similar_label(label, [item["label"] for item in items]):
+            items.append({"label": label[:16], "source": "video", "field": "video.confirmed_fact"})
+    confirmed = items[:12]
+
+    pending: list[dict[str, str]] = []
+    for note in state.uncertain_facts:
+        lowered = note.lower()
+        for keywords, label in _PENDING_RULES:
+            if any(keyword in lowered for keyword in keywords) and all(item["label"] != label for item in pending):
+                pending.append({"label": label, "source": "pending", "field": ""})
+                break
+        if len(pending) >= 3:
+            break
+    return {"confirmed": len(confirmed), "total": len(confirmed) + len(pending), "items": confirmed + pending}

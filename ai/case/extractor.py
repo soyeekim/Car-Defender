@@ -7,6 +7,7 @@ LLM Structured Output으로 추출하고, 호출 실패 시 규칙 기반 추출
 from __future__ import annotations
 
 import re
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from common.jsonutil import compact_json
@@ -22,6 +23,86 @@ _DATE_PATTERNS = [
     re.compile(r"(\d{1,2})월\s*(\d{1,2})일"),
 ]
 _TIME_PATTERN = re.compile(r"((?:오전|오후|새벽|저녁|아침|낮)?\s*\d{1,2}\s*시(?:\s*\d{1,2}\s*분)?(?:\s*경|쯤|정도)?|\d{1,2}:\d{2})")
+_KST = timezone(timedelta(hours=9))
+# "어제 사고 났어요" 같은 상대 날짜 표현 → 사건 등록일 기준으로 계산한다 (LLM 은 오늘 날짜를 모르므로 스스로 바꾸게 두면 지어낸다)
+_RELATIVE_DAYS: list[tuple[re.Pattern, Optional[int]]] = [
+    (re.compile(r"오늘"), 0),
+    (re.compile(r"어제|어젯밤"), 1),
+    (re.compile(r"그제|그저께|엊그제|이틀\s*전"), 2),
+    (re.compile(r"사흘\s*전"), 3),
+    (re.compile(r"일주일\s*전|1주일\s*전|지난\s*주"), 7),
+    (re.compile(r"(\d{1,2})\s*일\s*전"), None),
+]
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def case_today(state: CaseState) -> date:
+    """사건이 등록된 날(KST). 대화가 며칠 이어져도 '어제'는 등록일 기준으로 읽는다."""
+    try:
+        registered = datetime.fromisoformat(str(state.created_at).replace("Z", "+00:00"))
+        if registered.tzinfo is None:
+            registered = registered.replace(tzinfo=timezone.utc)
+        return registered.astimezone(_KST).date()
+    except (TypeError, ValueError):
+        return datetime.now(_KST).date()
+
+
+def explicit_date_in(text: str) -> Optional[str]:
+    for pattern in _DATE_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            groups = match.groups()
+            if len(groups) == 3:
+                return f"{groups[0]}-{int(groups[1]):02d}-{int(groups[2]):02d}"
+            return f"{int(groups[0]):02d}-{int(groups[1]):02d} (연도 미확인)"
+    return None
+
+
+def relative_date_in(text: str, today: date) -> Optional[tuple[str, str]]:
+    """(YYYY-MM-DD, 표현) — 메시지의 상대 날짜 표현을 등록일 기준으로 바꾼다. 없으면 None."""
+    for pattern, days in _RELATIVE_DAYS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        offset = days if days is not None else int(match.group(1))
+        return (today - timedelta(days=offset)).isoformat(), match.group(0)
+    return None
+
+
+def ground_date_facts(state: CaseState, message: str, extraction: UserFactExtraction) -> UserFactExtraction:
+    """LLM 이 뽑은 사고 날짜를 사용자 메시지에 근거시킨다.
+
+    - 메시지에 날짜가 명시돼 있으면 그 값을 쓴다.
+    - '어제' 같은 상대 표현만 있으면 사건 등록일 기준으로 계산한다.
+    - 둘 다 없으면 날짜 사실을 버린다 — 모델이 오늘 날짜를 모른 채 지어낸 값이다.
+    """
+    today = case_today(state)
+    explicit = explicit_date_in(message)
+    relative = relative_date_in(message, today)
+    kept: list[ExtractedFact] = []
+    for item in extraction.new_facts:
+        if item.field != "accident_datetime.date" and item.answers_field != "accident_datetime.date":
+            kept.append(item)
+            continue
+        if str(item.value or "").strip().lower() == "unknown":
+            kept.append(item)
+            continue
+        if explicit:
+            if _ISO_DATE.match(explicit) and item.value != explicit:
+                item.value = explicit
+                item.fact = f"사고 발생 날짜: {explicit}"
+            kept.append(item)
+            continue
+        if relative:
+            iso, word = relative
+            item.value = iso
+            item.fact = f"사고 발생 날짜: {iso} (사용자 진술 '{word}', 사건 등록일 {today.isoformat()} 기준)"
+            item.confidence = min(item.confidence, 0.85)
+            kept.append(item)
+            continue
+        extraction.ignored_opinions.append(f"근거 없는 사고 날짜 추출 제외: {item.value}")
+    extraction.new_facts = kept
+    return extraction
 
 
 def _video_vehicle_lines(state: CaseState) -> str:
@@ -73,16 +154,14 @@ def rule_based_extraction(state: CaseState, message: str) -> UserFactExtraction:
         if match and any(marker in lowered for marker in ("내 차", "제 차", "본인", "우리 차", "내차")):
             facts.append(ExtractedFact(field="ego_vehicle.vehicle_id", value=f"vehicle_{match.group(1)}", fact=f"영상 속 vehicle_{match.group(1)}이 사용자 차량이다.", verification="not_visible_in_video", answers_field="ego_vehicle.vehicle_id", confidence=0.9))
 
-    for pattern in _DATE_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            groups = match.groups()
-            if len(groups) == 3:
-                value = f"{groups[0]}-{int(groups[1]):02d}-{int(groups[2]):02d}"
-            else:
-                value = f"{int(groups[0]):02d}-{int(groups[1]):02d} (연도 미확인)"
-            facts.append(ExtractedFact(field="accident_datetime.date", value=value, fact=f"사고 발생 날짜: {value}", verification="not_visible_in_video", answers_field="accident_datetime.date", confidence=0.85))
-            break
+    explicit = explicit_date_in(text)
+    if explicit:
+        facts.append(ExtractedFact(field="accident_datetime.date", value=explicit, fact=f"사고 발생 날짜: {explicit}", verification="not_visible_in_video", answers_field="accident_datetime.date", confidence=0.85))
+    elif "사고" in text or pending("accident_datetime.date"):
+        relative = relative_date_in(text, case_today(state))
+        if relative:
+            iso, word = relative
+            facts.append(ExtractedFact(field="accident_datetime.date", value=iso, fact=f"사고 발생 날짜: {iso} (사용자 진술 '{word}' 기준)", verification="not_visible_in_video", answers_field="accident_datetime.date", confidence=0.8))
     time_match = _TIME_PATTERN.search(text)
     if time_match:
         value = time_match.group(1).strip()
@@ -128,6 +207,7 @@ def extract_case_facts(
         pending_questions=_pending_lines(state),
         case_state=compact_json(state.compact(include_timeline=False), max_chars=9000),
         video_vehicles=_video_vehicle_lines(state),
+        today=case_today(state).isoformat(),
     )
     try:
         response = client.generate_json(system=system.text, user=user, schema=UserFactExtraction, task=task.task)
@@ -152,6 +232,7 @@ def extract_case_facts(
         )
         extraction = rule_based_extraction(state, user_message)
 
+    extraction = ground_date_facts(state, user_message, extraction)
     # 이미 확정된 슬롯과 같은 값을 다시 진술한 경우 사실 목록에서 중복을 막는다.
     deduped = []
     for item in extraction.new_facts:

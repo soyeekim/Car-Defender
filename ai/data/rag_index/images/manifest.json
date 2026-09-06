@@ -2836,6 +2836,20 @@
    "source_type": "roundabout_special_standard",
    "source_file": "250624_2차로형 회전교차로사고 과실비율 비정형기준.pdf",
    "page": 69
+  },
+  "보16": {
+   "file": "보16.png",
+   "unit_type": "standard_chart",
+   "source_type": "fault_standard",
+   "source_file": "230630_자동차사고 과실비율 인정기준_최종.pdf",
+   "page": 74
+  },
+  "보18": {
+   "file": "보18.png",
+   "unit_type": "standard_chart",
+   "source_type": "fault_standard",
+   "source_file": "230630_자동차사고 과실비율 인정기준_최종.pdf",
+   "page": 78
   }
  }
 }

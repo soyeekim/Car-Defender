@@ -42,7 +42,7 @@ DEFAULT_PDF_PATHS = [
     _ROOT / "data" / "text" / "250624_2차로형 회전교차로사고 과실비율 비정형기준.pdf",
 ]
 DEFAULT_INDEX_DIR = _ROOT / "data" / "rag_index"
-INDEX_VERSION = 4
+INDEX_VERSION = 6  # 5: 심의사례 PDF 를 좌표 기반(2단 표·2단 주장)으로 다시 읽음, 6: 인정기준·회전교차로 도표도 좌표 기반(표 구조)으로 읽음
 
 _SOURCE_TYPES = {
     "(최종)과실비율심의사례_(54MB).pdf": "deliberation_case",
@@ -139,6 +139,10 @@ def _extract_chart_number(text: str, unit_kind: Optional[str], unit_id: Optional
     if unit_kind in {"standard_chart", "roundabout_chart"}:
         return unit_id
     # 심의사례는 본문보다 상단의 참고도표 번호가 우선이다. 괄호 세부유형을 보존한다.
+    # 좌표 기반 추출(rag/pdf_layout.py)은 상단 상자를 "참고기준 252-4(가)" 한 줄로 준다 → 하이픈·괄호까지 그대로 쓴다
+    boxed = re.search(r"(?m)^참고기준\s+([1-9]\d{2}(?:-\d+)?(?:\([가-힣]\))?)\s*$", text[:2500])
+    if boxed:
+        return boxed.group(1)
     parenthetical = re.search(r"\b([1-9]\d{2}\([가-힣]\))", text[:2500])
     if parenthetical:
         return parenthetical.group(1)
@@ -156,7 +160,7 @@ def _extract_ratio(text: str) -> Optional[str]:
     patterns = [
         r"결정비율[^\n]{0,100}?(\d{1,3})\s*[:：]\s*(\d{1,3})",
         r"기본\s*비율[^\n]{0,100}?(\d{1,3})\s*[:：]\s*(\d{1,3})",
-        r"기본\s*과실비율[^\n]{0,100}?A\s*(\d{1,3})\s*B\s*(\d{1,3})",
+        r"기본\s*과실비율[^\n]{0,100}?A\s*(\d{1,3})\s*[:：]?\s*B\s*(\d{1,3})",
         r"기본\s*과실비율[^\n]{0,100}?레드\s*(\d{1,3})\s*블루\s*(\d{1,3})",
     ]
     for pattern in patterns:
@@ -219,7 +223,18 @@ def create_parent_documents(
     for pdf_path in pdf_paths:
         path = Path(pdf_path).expanduser().resolve()
         source_type = _SOURCE_TYPES.get(path.name, "fault_standard")
-        pages = page_extractor(path)
+        if source_type == "deliberation_case" and page_extractor is extract_pdf_pages:
+            # 심의사례 PDF 는 '사례 개요' 표(2단)와 주장 내용(2단) 때문에 일반 추출로는 문장이 갈라진다 → 좌표 기반 재구성
+            from rag.pdf_layout import extract_case_pages
+
+            pages = extract_case_pages(path)
+        elif source_type in {"fault_standard", "roundabout_special_standard"} and page_extractor is extract_pdf_pages:
+            # 인정기준 도표는 세로 라벨·머리글이 표 사이에 끼어든다 → 배지·역할·기본비율·수정요소 행을 표 구조로 재구성
+            from rag.chart_layout import extract_standard_pages
+
+            pages = extract_standard_pages(path)
+        else:
+            pages = page_extractor(path)
         first_content_page = _MIN_CONTENT_PAGES.get(path.name, 1)
         active_pages: list[tuple[int, str]] = []
         active_kind: Optional[str] = None
@@ -250,7 +265,8 @@ def create_parent_documents(
                 continue
 
             if active_pages:
-                max_pages = 6 if active_kind == "case" else 16
+                # 심의사례는 2~3쪽, 도표는 해설·관련 법규까지 5쪽 안팎. 그 뒤 총설·해설 쪽이 도표에 붙지 않게 막는다
+                max_pages = 6
                 if len(active_pages) < max_pages:
                     active_pages.append((page_number, page_text))
                     continue
@@ -399,6 +415,26 @@ def _fingerprint(
     return digest.hexdigest()
 
 
+def _reusable_embeddings(directory: Path, model: str) -> dict[str, np.ndarray]:
+    """같은 임베딩 모델로 만든 기존 인덱스가 있으면 embedding_text → 벡터 사전을 돌려준다 (없거나 깨졌으면 빈 사전)."""
+    manifest_path = directory / "manifest.json"
+    children_path = directory / "children.jsonl"
+    embeddings_path = directory / "embeddings.npy"
+    if not (manifest_path.is_file() and children_path.is_file() and embeddings_path.is_file()):
+        return {}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("embedding_model") != model:
+            return {}
+        children = _read_jsonl(children_path)
+        embeddings = np.load(embeddings_path)
+        if len(children) != embeddings.shape[0]:
+            return {}
+    except (OSError, ValueError):
+        return {}
+    return {child["embedding_text"]: embeddings[index] for index, child in enumerate(children)}
+
+
 def build_index(
     *,
     pdf_paths: Iterable[str | Path] = DEFAULT_PDF_PATHS,
@@ -410,6 +446,7 @@ def build_index(
     embedder: Optional[Callable[[list[str], str], np.ndarray]] = None,
     page_extractor: Callable[[str | Path], list[str]] = extract_pdf_pages,
     progress: Optional[Callable[[str], None]] = None,
+    reuse_embeddings: bool = True,
 ) -> Path:
     paths = [Path(item).expanduser().resolve() for item in pdf_paths]
     directory = Path(index_dir).expanduser().resolve()
@@ -436,15 +473,28 @@ def build_index(
         raise RuntimeError("RAG 인덱스에 넣을 PDF 텍스트를 추출하지 못했습니다.")
 
     embed = embedder or _openai_embed
-    batches = []
-    for start in range(0, len(children), batch_size):
-        stop = min(start + batch_size, len(children))
+    # 글이 그대로인 Child 는 기존 벡터를 재사용한다 → 한 자료(예: 도표)만 다시 읽어도 나머지(심의사례) 검색 결과는 수치까지 그대로다
+    reusable = _reusable_embeddings(directory, model) if reuse_embeddings else {}
+    vectors: list[Optional[np.ndarray]] = [None] * len(children)
+    pending: list[int] = []
+    for index, child in enumerate(children):
+        cached = reusable.get(child["embedding_text"])
+        if cached is not None:
+            vectors[index] = cached
+        else:
+            pending.append(index)
+    reused = len(children) - len(pending)
+    if progress and reused:
+        progress(f"기존 임베딩 재사용: {reused}/{len(children)} Child")
+    for start in range(0, len(pending), batch_size):
+        batch = pending[start : start + batch_size]
         if progress:
-            progress(f"Child 임베딩 생성 중: {stop}/{len(children)}")
-        batches.append(
-            embed([item["embedding_text"] for item in children[start:stop]], model)
-        )
-    embeddings = _normalize_rows(np.vstack(batches).astype(np.float32))
+            progress(f"Child 임베딩 생성 중: {min(start + batch_size, len(pending))}/{len(pending)}")
+        # 새 벡터만 정규화한다 — 재사용 벡터는 이미 정규화돼 있고, 다시 나누면 반올림으로 바이트가 달라진다
+        computed = _normalize_rows(np.asarray(embed([children[index]["embedding_text"] for index in batch], model), dtype=np.float32))
+        for index, row in zip(batch, computed):
+            vectors[index] = np.asarray(row, dtype=np.float32)
+    embeddings = np.vstack(vectors).astype(np.float32)
 
     directory.mkdir(parents=True, exist_ok=True)
     outputs = {

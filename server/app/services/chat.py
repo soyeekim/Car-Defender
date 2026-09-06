@@ -15,7 +15,7 @@ from app.jobs.verdict import start_verdict
 from app.models import Case, Message
 from app.services import cases as case_service
 from app.services.actions import run_action
-from app.services.verdict import merge_facts, recent_turns, snapshot
+from app.services.verdict import merge_facts, recent_turns, snapshot, sync_opponent_claim
 
 log = logging.getLogger(__name__)
 
@@ -123,6 +123,9 @@ async def _process(db: AsyncSession, case_id: str, message_id: str) -> None:
         timeout=get_settings().job_timeout_seconds,
     )
     await merge_facts(db, case_id, result.fact_updates)
+    if "opponent_claim" in result.fact_updates:
+        # 판정 뒤에 상대 보험사 주장을 말해도 판정 카드의 비교 막대가 갱신되게 한다
+        await sync_opponent_claim(db, case_id, result.fact_updates.get("opponent_claim"))
     await _assistant_text(db, case_id, result.reply)
 
     if result.next_action == "none":

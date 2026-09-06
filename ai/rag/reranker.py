@@ -22,7 +22,7 @@ class _Validations(BaseModel):
 
 
 def compact_case_for_prompt(case: RetrievedCase, *, description_chars: int = 700) -> dict:
-    return {
+    compact = {
         "case_id": case.case_id,
         "source_type": case.source_type,
         "title": case.title,
@@ -32,11 +32,19 @@ def compact_case_for_prompt(case: RetrievedCase, *, description_chars: int = 700
         "decision_ratio": case.decision_ratio,
         "accident_description": (case.accident_description or case.excerpt)[:description_chars],
         "key_issues": case.key_issues[:4],
-        "decision_reasons": case.decision_reasons[:4],
+        "decision_reasons": [item[:300] for item in case.decision_reasons[:4]],
         "modification_factors": case.modification_factors[:6],
         "metadata": case.metadata.model_dump(exclude_none=True),
         "retrieval_similarity": round(case.similarity, 3),
     }
+    if case.source_type != "deliberation_case":
+        # 인정기준 도표: A·B 역할과 변형별 기본비율이 사건과의 대응을 정한다
+        compact["role_a"] = case.role_a
+        compact["role_b"] = case.role_b
+        if case.chart_variants:
+            compact["variants"] = [f"{item.label} {item.description} → 기본 {item.basic_ratio}".strip() for item in case.chart_variants]
+        compact["modification_factors"] = [item.text() for item in case.chart_modifiers[:12]] or compact["modification_factors"]
+    return compact
 
 
 def _ensure_deliberation_case(ranked: list[RetrievedCase], pool: list[RetrievedCase], top_k: int) -> list[RetrievedCase]:
@@ -59,6 +67,7 @@ def rerank_cases(
     *,
     top_k: int = 5,
     run_logger: Optional[RunLogger] = None,
+    max_candidates: int = 8,
 ) -> list[RetrievedCase]:
     if not candidates:
         return []
@@ -68,10 +77,10 @@ def rerank_cases(
     if client is not None:
         system = load_prompt("master_agent", "system")
         task = load_prompt("master_agent", "case_validation")
-        # 후보 8건·설명 500자로 제한: rerank 호출이 RAG 턴 지연의 대부분(약 20초)을 차지한다
+        # 후보 8건·설명 500자로 제한: rerank 호출이 RAG 턴 지연의 대부분(약 20초)을 차지한다 (도표는 짧아서 12건까지)
         user = task.render(
             case_state=compact_json(state.compact(include_timeline=False), max_chars=6000),
-            retrieved_cases=compact_json([compact_case_for_prompt(item, description_chars=500) for item in candidates[:8]], max_chars=16000),
+            retrieved_cases=compact_json([compact_case_for_prompt(item, description_chars=500) for item in candidates[:max_candidates]], max_chars=20000),
         )
         try:
             response = client.generate_json(system=system.text, user=user, schema=_Validations, task=task.task)

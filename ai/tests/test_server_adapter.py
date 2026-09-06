@@ -70,6 +70,8 @@ def _json_safe(value):
 
 def _answer_for(state_facts) -> str:
     state = unpack_state(state_facts[STATE_KEY])
+    if state.assessment_offer_pending:
+        return "예상 과실비율 판정해줘"  # "판정해 드릴까요?" 제안 수락
     field = state.pending_questions[0].field if state.pending_questions else ""
     return ANSWERS.get(field, "모르겠어요")
 
@@ -87,7 +89,7 @@ def _run_until_verdict(agent, tmp_path, description="사거리에서 직진하�
     facts = dict(analysis["facts"])
     messages = [Turn("user", description), Turn("assistant", analysis["summary_text"])] + [Turn("assistant", q) for q in analysis["questions"]]
     result = None
-    for _ in range(8):
+    for _ in range(10):
         result, facts, messages = _chat(agent, facts, messages, _answer_for(facts))
         if result["next_action"] == "verdict":
             break
@@ -128,14 +130,17 @@ def test_analyze_without_questions_goes_straight_to_verdict(tmp_path):
     agent, _, _ = build_real_agent(tmp_path, text_client=NothingToAsk())
     description = "내 차 블랙박스야. 사거리에서 직진하다가 사고났어."
     result = agent.analyze(SimpleNamespace(video_path=_video(tmp_path), video_mime="video/mp4", description=description))
-    # 설명에서 영상 소유 관계가 이미 확인됐고 Agent가 물을 것이 없다고 판단 → 분석 말풍선에 유사 심의사례까지 보여주고
-    # '추가 정황' 열린 질문 하나만 남긴다 (판정은 아직)
-    assert "비슷한 심의사례" in result["summary_text"] and "2018-070162" in result["summary_text"]
+    # 설명에서 영상 소유 관계가 이미 확인됐고 Agent가 물을 것이 없다고 판단 → 분석 말풍선 + '추가 정황' 열린 질문 카드.
+    # 심의사례는 아직 보여주지 않는다 (사용자가 판정을 요청할 때 찾는다)
+    assert "심의사례" not in result["summary_text"]
     assert len(result["questions"]) == 1 and "추가로 알려주실" in result["questions"][0]
     facts = result["facts"]
     messages = [Turn("user", description), Turn("assistant", result["summary_text"]), Turn("assistant", result["questions"][0])]
-    chat, facts, _ = _chat(agent, facts, messages, "없어요")
+    chat, facts, messages = _chat(agent, facts, messages, "없어요")
+    assert chat["next_action"] == "none" and "판정해 드릴까요" in chat["reply"], chat["reply"]
+    chat, facts, _ = _chat(agent, facts, messages, "예상 과실비율 판정해줘")
     assert chat["next_action"] == "verdict", chat["reply"]
+    assert "비슷한 심의사례를 찾았어요" in chat["reply"] and "2018-070162" in chat["reply"]
 
 
 def test_prepare_video_path_adds_extension_from_mime(tmp_path, monkeypatch):
@@ -318,7 +323,10 @@ def test_opponent_claim_is_parsed_and_returned(tmp_path):
     verdict = Verdict(1, judged["ratio_mine"], judged["ratio_other"], judged["summary"], judged["basis"])
     result, facts, messages = _chat(agent, facts, messages, "상대 보험사가 나 50 : 상대 50 이라고 주장하는데", verdict=verdict)
     assert facts["opponent_claim"] == {"mine": 50, "other": 50}
+    assert result["reply"].startswith("상대 보험사 주장(나 50 : 상대 50)을 판정 카드에 함께 표시했어요.")  # 판정 뒤에 말해도 카드 비교에 반영
     assert parse_opponent_claim("보험사는 70대30을 주장") == {"mine": 70, "other": 30}
+    assert parse_opponent_claim("상대 보험사 측에서 5:5 과실비율을 주장") == {"mine": 50, "other": 50}  # 10 단위 축약 표기
+    assert parse_opponent_claim("상대가 7대3 이래요") == {"mine": 70, "other": 30}
     assert parse_opponent_claim("과실 60% 이래요") is None
     assert parse_opponent_claim(None, {"mine": 30, "other": 70}) == {"mine": 30, "other": 70}
 
@@ -403,14 +411,17 @@ def test_video_intro_and_recheck_note_hide_internal_ids():
     state.video_analysis = video
     agent = MasterAccidentAgent(text_client=None, video_agent=None, rag_tool=None, document_agent=None, run_logger=None)  # type: ignore[arg-type]
     intro = agent._video_intro(state)
-    assert "vehicle_" not in intro and "블랙박스 차량(자차), 흰색 승용차" in intro
+    assert "vehicle_" not in intro and "블랙박스 촬영 차량, 흰색 승용차" in intro and "자차" not in intro  # 소유 관계는 묻기 전이라 단정하지 않는다
 
-    # 재분석 안내: 내부 지시문 대신 달라진 결론만
-    events = ["영상 focus 재분석 완료 [충돌 시점 전후에서 실제 접촉한 두 차량을 재검증하라. 상대 차량이 vehicle inventory에 없으면]: vehicle_2 추가: 좌측에서 진입한 흰색 승용차, collision pair 확정: ['vehicle_1', 'vehicle_2']"]
+    # 재분석 안내: 내부 지시문·모델의 변경 기록 대신 슬롯에서 새로 확정된 라벨만
+    events = [
+        "영상 focus 재분석 완료 [충돌 시점 전후에서 실제 접촉한 두 차량을 재검증하라. 상대 차량이 vehicle inventory에 없으면]: vehicle_2.turn_signal 필드를 'none'(CONFIRMED)으로 기록함",
+        "영상 재확인 결과: 상대 방향지시등 미점등; 점선 구간",
+    ]
     note = agent._recheck_note(events, state)
-    assert note.startswith("말씀해 주신 내용을 바탕으로 영상을 다시 확인했어요. 달라진 점:")
-    assert "재검증하라" not in note and "inventory" not in note and "vehicle_2" not in note
-    assert agent._recheck_note(["영상 focus 재분석 완료 [x]: 기존 결론 유지"], state).endswith("결론은 그대로예요.")
+    assert note == "말씀해 주신 내용을 바탕으로 영상을 다시 확인했어요. 새로 확인된 점: 상대 방향지시등 미점등, 점선 구간."
+    assert "재검증하라" not in note and "필드" not in note and "vehicle_2" not in note
+    assert agent._recheck_note(["영상 focus 재분석 완료 [x]: 기존 결론 유지", "영상 재확인 결과: 새로 확인된 사실 없음"], state).endswith("결론은 그대로예요.")
     assert agent._recheck_note([], state) == ""
 
 
@@ -418,10 +429,6 @@ def test_review_ack_and_opponent_candidate_question():
     from agents.master_agent import MasterAccidentAgent
     from video.schemas import VehicleEntry, VideoResult
     from video.validation import user_confirmation_question
-
-    assert MasterAccidentAgent._review_ack(["사용자가 모른다고 답함: other_vehicle.turn_signal"]).startswith("확인했어요. 기억나지 않는 부분은")
-    assert "반영해서" in MasterAccidentAgent._review_ack(["새 사실 반영: 상대 차 깜빡이 안 켬"])
-    assert MasterAccidentAgent._review_ack([]).startswith("확인했어요.")
 
     # 요약문에는 상대 차량이 적혀 있지만 목록에는 없는 경우 → '찾지 못했다'가 아니라 후보를 확인한다
     video = VideoResult(
@@ -485,7 +492,7 @@ def test_precedent_body_text_is_structured_case_only():
 
     chart = RetrievedCase(case_id="차1-1", source_type="fault_standard", title="녹색직진 대 적색직진", chart_number="차1-1", basic_ratio="0:100", modification_factors=["A 현저한 과실 +10", "A 중대한 과실 +20"])
     chart_text = precedent_body_text(chart)
-    assert chart_text.startswith("과실비율 인정기준 도표 차1-1") and "기본 과실비율\n\n0:100" in chart_text and "수정요소\n\nA 현저한 과실 +10" in chart_text
+    assert chart_text.startswith("과실비율 인정기준 도표 차1-1") and "기본 과실비율\n\nA:B = 0:100" in chart_text and "수정요소\n\nA 현저한 과실 +10" in chart_text
 
 
 def test_readable_lines_breaks_after_sentences_only():
@@ -502,3 +509,40 @@ def test_readable_lines_breaks_after_sentences_only():
         "- 2017-045140 제목 · 기본 80:20, 결정 70:30\n  공통점: 사거리 교차로\n\n심의사례의 사실관계는 다를 수 있어요."
     )
     assert readable_lines(None) is None and readable_lines("") == ""
+
+
+def test_fact_chips_from_video_confirmed_slots():
+    """사건 현황판 칩: 영상 CONFIRMED 항목만 짧은 라벨로, 영상으로 못 본 과실 요소는 '확인 필요'로."""
+    from agent.presenters import fact_chips
+    from state.case_state import Slot
+
+    state = CaseState()
+    v = lambda value: Slot(value=value, source="video", status="CONFIRMED")  # noqa: E731
+    state.road.road_type = v("roundabout")
+    state.road.signal_present = v("false")
+    state.road.lane_marking = v("dashed")
+    state.ego_vehicle.movement = v("straight")
+    state.ego_vehicle.lane = v("lane_2")
+    state.ego_vehicle.estimated_speed = v("약 48km/h")
+    state.other_vehicle.entry_direction = v("left_side_road")
+    state.other_vehicle.movement = v("lane_change_right")
+    state.other_vehicle.lane = v("lane_1")
+    state.other_vehicle.signal = Slot(value="red", source="user", status="CONFIRMED")  # 사용자 진술 → 칩 아님
+    state.other_vehicle.turn_signal = Slot(value="none", source="video", status="INFERRED")  # 추정 → 칩 아님
+    state.collision.type = v("side_swipe")
+    state.collision.ego_collision_part = v("left_side")
+    state.uncertain_facts = ["vehicle_2의 우측 방향지시등 점등 여부 (화각 사각지대로 확인 불가)", "사용자가 accident_datetime.date에 대해 모른다고 답함", "정지선 통과 시점 확인 불가"]
+
+    chips = fact_chips(state)
+    labels = [item["label"] for item in chips["items"]]
+    assert labels[:6] == ["회전교차로", "2차로 직진", "상대 좌측 진입", "상대 1차로 차로 변경", "신호등 없음", "점선 구간"]
+    assert "약 48km/h" in labels and "측면 접촉" in labels and "내 차 좌측면" in labels
+    assert "상대 적색 신호 (위반)" not in labels and "상대 방향지시등 미점등" not in labels
+    pending = [item["label"] for item in chips["items"] if item["source"] == "pending"]
+    assert pending == ["상대 방향지시등 확인 필요", "정지선 통과 확인 필요"]  # 사고 일시 '모름'은 쟁점이 아니다
+    assert chips["confirmed"] == len(labels) - 2 and chips["total"] == len(labels)
+    assert all(len(item["label"]) <= 16 for item in chips["items"])
+
+    packed = pack_facts(state)
+    assert packed["fact_chips"]["items"][0]["label"] == "회전교차로"
+    _json_safe(packed)

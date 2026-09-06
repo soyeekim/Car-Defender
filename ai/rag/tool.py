@@ -110,8 +110,14 @@ class SimilarCaseRagTool:
                 tier = "fault_standard"
                 standard_candidates = self._retrieve(rag_query, STANDARD_SOURCES)
                 candidates = candidates + standard_candidates
-                ranked = rerank_cases(self.client, state, standard_candidates, top_k=top_k, run_logger=self.run_logger) if standard_candidates else []
-                cases = ranked[:top_k]
+                ranked = rerank_cases(self.client, state, standard_candidates, top_k=top_k, run_logger=self.run_logger, max_candidates=12) if standard_candidates else []
+                # 도표도 같은 검증을 통과해야 기준값이 된다. 회전교차로 표를 신호교차로 사건에 붙이는 일을 막는다
+                cases = [item for item in ranked if self._is_acceptable(item)][:top_k]
+                if not cases:
+                    tier = "none"
+                    fallback_reason += " / " + ("인정기준 도표에서도 검색된 후보가 없음" if not standard_candidates else "인정기준 도표도 사고 구조 검증 기준을 넘지 못함")
+                    if progress:
+                        progress("참고할 인정기준 도표도 없음 → 기준 없이 임시 판정")
         else:
             candidates = self._retrieve(rag_query, None)
             cases = rerank_cases(self.client, state, candidates, top_k=top_k, run_logger=self.run_logger)[:top_k]

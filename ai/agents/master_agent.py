@@ -23,13 +23,9 @@ from agents.document_agent import DocumentAgent
 from agents.video_agent import VideoAnalysisAgent, VideoDecision
 from assessment.fault_ratio import assess_fault_ratio
 from case.extractor import extract_case_facts
-from case.questions import format_questions, generate_followup_questions, mark_pending_unknown, unregister_questions, video_gap_candidates
-from case.review import (
-    ADDITIONAL_FACTS_FIELD,
-    generate_case_review_questions,
-    mark_review_done,
-    review_questions_remaining,
-)
+from case.fact_labels import generate_fact_labels
+from case.questions import MAX_ASK_COUNT, format_questions, generate_followup_questions, mark_pending_unknown, unregister_questions, video_gap_candidates
+from case.review import ADDITIONAL_FACTS_FIELD
 from case.sufficiency import SufficiencyResult, check_information_sufficiency
 from common.jsonutil import compact_json
 from models.clients import OpenAITextClient, TextClient
@@ -41,7 +37,7 @@ from state.updater import UserFactExtraction, apply_user_extraction, merge_video
 from telemetry import RunLogger, get_run_logger, input_hash
 from video.base import compact_previous_result
 from video.schemas import Observation, VideoResult
-from video.validation import FocusTarget, collision_window_seconds
+from video.validation import FocusTarget, _opponent_candidate_from_text, collision_window_seconds
 
 Intent = Literal[
     "provide_facts",
@@ -160,6 +156,17 @@ _TOPIC_RULES: list[tuple[Intent, re.Pattern]] = [
 _REQUEST_VERB = re.compile(r"(작성|써\s*줘|써줘|써\s*주|만들|생성|뽑|준비|부탁|줘|주세요|해줘|해\s*주|필요해|보여|해봐|출력|받고\s*싶|싶어|싶습)")
 _PROCEDURE_QUESTION = re.compile(r"(뭐야|뭔가요|무엇|어떤\s*건|어떻게\s*해야|어떻게\s*하나|어떻게\s*하면|방법|절차|필요할까|해야\s*하나|해야\s*되|할\s*수\s*있나|가능한가|가능해)")
 _NEGATIVE_ANSWER = re.compile(r"^\s*(없|아니|아뇨|아니요|아니오|그게\s*다|더\s*없|딱히|모르|기억\s*안|괜찮|판정|이제\s*(판정|결론)|충분)")
+# 판정 제안("판정해 드릴까요?")에 대한 짧은 수락
+_AFFIRMATIVE = re.compile(r"^\s*(네|예|응|어|그래|좋아|좋습니다|해\s*줘|해\s*주세요|부탁|진행|시작|판정|ㅇㅇ|ok|okay|yes)", re.IGNORECASE)
+# 사실 수집이 끝난 뒤의 열린 질문과 판정 제안 문구
+OPEN_FACTS_QUESTION = (
+    "지금까지 확인한 내용 외에 추가로 알려주실 사고 정황이 있나요?\n"
+    "(예: 상대 차량 방향지시등, 진입 순서, 영상 시작 전 상황) 없으면 '없어요'라고 말씀해 주세요."
+)
+ASSESSMENT_OFFER = (
+    "지금까지 확인된 내용으로 비슷한 심의사례를 찾아 예상 과실비율을 판정해 드릴까요?\n"
+    "준비되셨으면 '예상 과실비율 판정해줘'라고 말씀해 주세요. 더 알려주실 내용이 있으면 먼저 말씀해 주셔도 돼요."
+)
 
 
 def rule_based_intent(state: CaseState, message: str) -> IntentResult:
@@ -295,6 +302,12 @@ class MasterAccidentAgent:
                                   wants_ratio_now=state.pending_intent == "request_fault_assessment", contains_new_facts=True)
             events.append(f"이전 요청 재개: {state.pending_intent}")
         state.pending_intent = None
+        # 판정 제안이 떠 있을 때 "네 / 판정해줘 / 예상 과실비율 판정해줘" → 판정 요청으로 본다
+        if state.assessment_offer_pending and not intent.contains_new_facts and (
+            intent.primary_intent == "request_fault_assessment" or _AFFIRMATIVE.match(message)
+        ):
+            intent = IntentResult(primary_intent="request_fault_assessment", secondary_intents=[intent.primary_intent], confidence=0.95, wants_ratio_now=True)  # type: ignore[arg-type]
+            events.append("판정 제안 수락")
         pending_before = {item.field for item in state.pending_questions}
         if self._is_pure_command(state, message, intent):
             # "사건경위서 작성해줘" 같은 짧은 명령에는 새 사실이 없으므로 추출 호출을 생략한다
@@ -309,6 +322,8 @@ class MasterAccidentAgent:
         answered_fields = pending_before - {item.field for item in state.pending_questions}
         if added:
             events.append("새 사실 반영: " + "; ".join(fact.fact for fact in added[:4]))
+        if any(fact.field == "opponent_claim" for fact in added):
+            events.append("상대 보험사 주장 기록: " + (extraction.opponent_claim or "").strip()[:120])
         if conflicts:
             events.append("영상과 충돌하는 진술 기록: " + "; ".join(item.description for item in conflicts[:3]))
         if extraction.ignored_opinions:
@@ -386,14 +401,21 @@ class MasterAccidentAgent:
                 events.append("영상 분석 실패 → 사용자 확인 정보로 진행")
             else:
                 events.append(f"영상 분석 완료 ({decision.passes}회 호출, {decision.status})")
+                # 서술에만 있고 목록에 빠진 상대 차량은 분석 결과 안에서 보정된다(video.validation.reconcile_vehicle_inventory) —
+                # 첫 턴에 영상을 한 번 더 돌리지 않는다 (분석은 한 번에 제대로, 재분석으로 덮어쓰지 않는다: 사용자 요청 2026-09-06)
                 if decision.status == "NEEDS_USER_CONFIRMATION" and decision.confirmation_question:
-                    question = Question(field="collision.participants_confirmed", question=decision.confirmation_question, importance="critical", asked_turn=state.turn_count)
+                    confirmation_question = decision.confirmation_question
+                    question = Question(field="collision.participants_confirmed", question=confirmation_question, importance="critical", asked_turn=state.turn_count)
                     state.pending_questions = [question]
                     if question.field not in state.asked_fields:
                         state.asked_fields.append(question.field)
                     state.set_stage("FACT_COLLECTING")
-                    return self._respond(state, message=self._video_intro(state) + "\n\n" + decision.confirmation_question, action="ASK_USER",
+                    return self._respond(state, message=self._video_intro(state) + "\n\n" + confirmation_question, action="ASK_USER",
                                          data={"questions": [question.model_dump()], "video_summary": self._video_summary_data(state)}, warnings=warnings)
+
+        # 1b. 사용자가 상대 차량을 확인해 줬는데 영상 차량 목록에는 아직 없으면, 그 확인을 들고 영상 agent 가 다시 찾는다
+        if "collision.participants_confirmed" in answered_fields and state.video_analysis and len(state.video_analysis.vehicles) < 2:
+            self._try_register_opponent(state, events, progress=progress, user_note=message)
 
         # 2. 영상 재확인 요청
         if intent.primary_intent == "request_video_recheck" and state.video_analysis and state.video_path:
@@ -424,6 +446,12 @@ class MasterAccidentAgent:
                 state.critical_recheck_count += 1
             sufficiency = self._sufficiency(state)
 
+        # 5-0. 직전 질문에 답을 못 받았으면(딴 얘기·되묻기) 새 질문을 고르기 전에 그 질문을 먼저 정리한다
+        if state.fault_assessment is None and not explicit_conclusion and not wants_cases and not wants_document and state.pending_questions:
+            handled = self._handle_pending_questions(state, message=message, intent=intent, events=events, answered_fields=answered_fields, warnings=warnings)
+            if handled is not None:
+                return handled
+
         # 5. 사실 수집 단계 — 한 턴에 한 질문.
         #    (a) 코드 필수 항목(영상 소유 관계·사용자 차량 식별 등 critical)은 반드시 먼저 묻는다.
         #    (b) 그 외에는 Agent가 사건 상태를 보고 "판정에 영향을 주는데 미확인인 사실"을 스스로 추론해 고른다.
@@ -432,12 +460,15 @@ class MasterAccidentAgent:
         known_fields = {item.field for item in askable}
         askable += [item for item in video_gap_candidates(state) if item.field not in known_fields]
         critical = [item for item in askable if item.importance == "critical"]
+        new_facts_now = bool(answered_fields) or any(event.startswith("새 사실 반영") for event in events)
         agent_turn = (
             state.video_analyzed
             and not state.retrieved_cases
             and not explicit_conclusion
             and not wants_cases
             and state.fact_question_rounds < self.settings.agent.max_fact_question_rounds
+            # 열린 질문("추가로 알려주실 정황?")까지 나간 뒤에는 새 사실이 들어온 턴에만 다시 고른다 (질문 → 열린 질문 → 또 질문 순서 방지)
+            and (ADDITIONAL_FACTS_FIELD not in state.asked_fields or new_facts_now)
         )
         if critical or agent_turn or (askable and not explicit_conclusion and not wants_cases and not sufficiency.ready_for_rag):
             first_turn = is_initial or not state.conversation_history[:-1]
@@ -454,25 +485,37 @@ class MasterAccidentAgent:
                 intro_default=self._video_intro(state) if first_turn else "",
                 use_llm_intro=first_turn,  # 이어지는 턴에서는 영상 요약을 반복하지 않는다
                 allow_agent_choice=True,
+                max_rechecks=self.max_master_rechecks,
             )
             # Agent가 "영상으로 확인 가능"하다고 판단한 쟁점은 사용자에게 묻지 않고 Video Agent 재분석으로 해결한다
-            if rechecks and not critical and self._apply_agent_rechecks(state, rechecks, events, progress):
+            rechecks_applied = bool(rechecks) and not critical and self._apply_agent_rechecks(state, rechecks, events, progress)
+            if rechecks_applied:
                 unregister_questions(state, questions)
                 sufficiency = self._sufficiency(state)
                 intro, questions, _ = generate_followup_questions(
                     self.text_client, state, [item for item in video_gap_candidates(state) if item.importance == "high"],
                     max_questions=self.settings.agent.max_questions_per_turn, run_logger=self.run_logger,
-                    intro_default="", use_llm_intro=False, allow_agent_choice=True,
+                    intro_default="", use_llm_intro=False, allow_agent_choice=True, max_rechecks=self.max_master_rechecks,
                 )
+            elif rechecks and not questions and not critical:
+                # Agent가 재분석만 고르고 질문은 비웠는데 재분석은 할 수 없다 → "재분석 불가"를 알리고 사용자에게 물을 것을 다시 고르게 한다
+                # (실제 대화에서 이 조합이 "물을 게 없음"으로 흘러 판정 제안으로 건너뛰었다)
+                events.append("영상 재분석 불가 → 사용자 질문 재선택")
+                intro_again, questions, _ = generate_followup_questions(
+                    self.text_client, state, candidates,
+                    max_questions=self.settings.agent.max_questions_per_turn, run_logger=self.run_logger,
+                    intro_default=intro, use_llm_intro=first_turn and not intro, allow_agent_choice=True, max_rechecks=0, rechecks_unavailable=True,
+                )
+                intro = intro or intro_again
             if questions and not critical:
                 state.fact_question_rounds += 1
             if questions:
                 state.set_stage("FACT_COLLECTING")
                 intro = self._strip_unfulfilled_recheck_promise(intro, events)
+                intro = self._strip_request_sentences(intro)  # 질문은 질문 카드가 하나만 한다 — 안내문에 섞인 질문·요청 문장은 뺀다
                 text = format_questions(intro if intro else self._ack(events, is_initial, state), questions)
-                if first_turn:
-                    text = self._with_second_pass_note(state, text)
-                recheck_note = self._recheck_note(events, state)
+                # 첫 턴은 분석 결과 하나로 말한다 — 재분석 안내를 덧붙여 결과를 덮어쓴 것처럼 보이게 하지 않는다
+                recheck_note = "" if is_initial else self._recheck_note(events, state)
                 if recheck_note:
                     text = recheck_note + "\n" + text
                 if explicit_conclusion:
@@ -491,25 +534,25 @@ class MasterAccidentAgent:
                     text = "사건경위서에는 사고 일시가 들어가야 해요. " + format_questions("", questions)
                     return self._respond(state, message=text, action="ASK_USER", data={"questions": [q.model_dump() for q in questions]}, warnings=warnings)
 
-        # 6. 유사 심의사례 검색 → 제시 → 검토 대화 시작 (판정은 아직 하지 않는다)
         needs_assessment = state.fault_assessment is None or state.assessment_invalidated
-        if (sufficiency.ready_for_rag or explicit_conclusion or wants_cases) and (not state.retrieved_cases or state.assessment_invalidated):
-            cases = self._run_rag(state, events, progress=progress)
-            if cases and not explicit_conclusion and not state.case_review_done:
-                return self._present_cases_and_review(state, events, warnings, is_initial=is_initial, progress=progress)
+
+        # 6. 사실 수집 마무리 (첫 판정 전): Agent가 더 물을 것이 없으면 → 추가 정황 열린 질문 → 판정 제안.
+        #    사용자가 "예상 과실비율 판정해줘"라고 하면 그때 심의사례를 찾고 판정한다 (사례를 먼저 늘어놓지 않는다).
+        if state.fault_assessment is None and not state.assessment_invalidated and not explicit_conclusion and not wants_cases:
+            wrap_up = self._wrap_up_fact_collection(state, message=message, intent=intent, events=events, answered_fields=answered_fields, warnings=warnings, is_initial=is_initial)
+            if wrap_up is not None:
+                return wrap_up
+
+        # 7. 유사 심의사례 검색 — 판정·문서·사례를 요청했을 때만
+        if (explicit_conclusion or wants_cases) and (not state.retrieved_cases or state.assessment_invalidated):
+            self._run_rag(state, events, progress=progress)
             if wants_cases and not explicit_conclusion:
                 return self._similar_cases_response(state, warnings)
 
-        # 7. 심의사례 검토 대화 진행 → 준비되면 종합 판정
-        if state.case_review_started and not state.case_review_done and not explicit_conclusion and not wants_cases:
-            review_response = self._continue_case_review(state, message=message, intent=intent, events=events, answered_fields=answered_fields, sufficiency=sufficiency, warnings=warnings, progress=progress)
-            if review_response is not None:
-                return review_response
-
         # 8. 명시적 판정/문서 요청 또는 재평가
         if (explicit_conclusion or state.assessment_invalidated) and needs_assessment:
-            if state.case_review_started and not state.case_review_done:
-                mark_review_done(state, "사용자 요청으로 판정 진행")
+            state.assessment_offer_pending = False
+            state.pending_questions = [item for item in state.pending_questions if item.field != ADDITIONAL_FACTS_FIELD]
             reassessing = "재평가" in " ".join(events)
             if self.defer_conclusions:
                 # 서버 모드: 문서 요청이라도 판정이 먼저다 → 판정 요청으로 넘기고, 문서 요청은 pending_intent로 남겨
@@ -549,6 +592,100 @@ class MasterAccidentAgent:
         if intent.primary_intent == "request_fault_assessment" and state.fault_assessment:
             return self._assessment_response(state, state.fault_assessment, events, warnings)
         return self._answer(state, message=message, intent=intent, events=events, warnings=warnings, is_initial=is_initial)
+
+    # ------------------------------------------------------------------ fact collection wrap-up
+    def _handle_pending_questions(
+        self,
+        state: CaseState,
+        *,
+        message: str,
+        intent: IntentResult,
+        events: list[str],
+        answered_fields: set[str],
+        warnings: list[str],
+    ) -> Optional[AgentResponse]:
+        """직전 턴의 질문에 답을 못 받았을 때: 사용자의 질문이면 답하고 다시 붙이고, 딴 얘기면 한 번 더 묻고,
+        두 번째도 답이 없으면 미확인으로 두고 넘어간다. 열린 질문(추가 정황)에 '없어요'는 답으로 본다."""
+        answered_now = bool(answered_fields) or any(event.startswith("새 사실 반영") for event in events)
+        open_pending = [item for item in state.pending_questions if item.field == ADDITIONAL_FACTS_FIELD]
+        # 열린 질문("추가로 알려주실 정황?")에는 되묻는 질문이 아닌 한 어떤 진술도 답이다 ("영상 시작 전에는 특별한 일 없었어요" 포함)
+        statement = intent.primary_intent in {"provide_facts", "answer_question", "other", "provide_opponent_claim"} and "?" not in message
+        if open_pending and (answered_now or _NEGATIVE_ANSWER.search(message) or statement):
+            state.review_answers[ADDITIONAL_FACTS_FIELD] = "provided" if answered_now else "none"
+            state.pending_questions = [item for item in state.pending_questions if item.field != ADDITIONAL_FACTS_FIELD]
+            events.append("추가 정황 " + ("반영" if answered_now else "없음"))
+        pending = [item for item in state.pending_questions if item.ask_count < MAX_ASK_COUNT]
+        if not state.pending_questions:
+            return None
+
+        claim_ack = self._claim_ack(state, events)
+        if pending and not claim_ack and intent.primary_intent in {"general_question", "ask_explanation", "provide_opponent_claim"}:
+            answer = self._answer(state, message=message, intent=intent, events=events, warnings=warnings, is_initial=False, respond=False)
+            for item in pending:
+                item.ask_count += 1
+                item.asked_turn = state.turn_count
+            text = answer + "\n\n아직 확인이 필요한 게 남아 있어요.\n" + format_questions("", pending)
+            return self._respond(state, message=text, action="ASK_USER", data={"questions": [q.model_dump() for q in pending]}, warnings=warnings)
+
+        if pending:
+            for item in pending:
+                item.ask_count += 1
+                item.asked_turn = state.turn_count
+            if answered_now:
+                text = (claim_ack or "확인했어요.") + "\n" + format_questions("", pending)
+            elif pending[0].field == ADDITIONAL_FACTS_FIELD:
+                text = "추가로 알려주실 사고 정황이 있으면 말씀해 주시고, 없으면 '없어요'라고 답해 주세요."
+            else:
+                text = "답변을 확인하지 못해서 다시 여쭤볼게요. 모르시면 '모름'이라고 답해 주셔도 돼요.\n" + format_questions("", pending)
+            return self._respond(state, message=text, action="ASK_USER", data={"questions": [q.model_dump() for q in pending]}, warnings=warnings)
+
+        # 두 번 물어도 답이 없는 질문 → 미확인으로 두고 진행
+        for item in state.pending_questions:
+            if item.field == ADDITIONAL_FACTS_FIELD:
+                state.review_answers[ADDITIONAL_FACTS_FIELD] = "none"
+                continue
+            note = f"사용자가 {item.field} 질문에 답하지 않아 미확인으로 처리"
+            if note not in state.uncertain_facts:
+                state.uncertain_facts.append(note)
+            events.append(f"미응답 질문 미확인 처리: {item.field}")
+        state.pending_questions = []
+        return None
+
+    def _wrap_up_fact_collection(
+        self,
+        state: CaseState,
+        *,
+        message: str,
+        intent: IntentResult,
+        events: list[str],
+        answered_fields: set[str],
+        warnings: list[str],
+        is_initial: bool,
+    ) -> Optional[AgentResponse]:
+        """Agent 질문이 끝난 뒤의 순서: 답 안 한 질문 재질문 → 추가 정황 열린 질문 → 판정 제안.
+
+        사용자가 제안을 받아들이면(`chat` 에서 request_fault_assessment 로 바꿔 준다) 여기를 지나 검색·판정으로 간다.
+        None 을 돌려주면 호출자가 다음 단계(검색·판정·문서·일반 답변)로 진행한다."""
+        answered_now = bool(answered_fields) or any(event.startswith("새 사실 반영") for event in events)
+        claim_ack = self._claim_ack(state, events)
+        ack = (claim_ack + " ") if claim_ack else ("확인했어요. " if answered_now else "")
+        intro = (self._video_intro(state) + "\n\n") if is_initial else ""
+
+        # 추가 정황 열린 질문 (한 번만)
+        if ADDITIONAL_FACTS_FIELD not in state.asked_fields:
+            question = Question(field=ADDITIONAL_FACTS_FIELD, question=OPEN_FACTS_QUESTION, importance="medium", asked_turn=state.turn_count)
+            state.pending_questions = [question]
+            state.asked_fields.append(ADDITIONAL_FACTS_FIELD)
+            state.asked_questions.append(OPEN_FACTS_QUESTION)
+            state.set_stage("FACT_COLLECTING")
+            return self._respond(state, message=intro + ack + OPEN_FACTS_QUESTION, action="ASK_USER",
+                                 data={"questions": [question.model_dump()], "open_question": True, "video_summary": self._video_summary_data(state) if is_initial else None}, warnings=warnings)
+
+        # 판정 제안 (새 사실이 들어오면 다시 제안한다)
+        state.assessment_offer_pending = True
+        state.set_stage("READY_FOR_RAG")
+        events.append("사실 수집 완료 → 판정 제안")
+        return self._respond(state, message=intro + ack + ASSESSMENT_OFFER, action="ASK_USER", data={"questions": [], "offer_assessment": True}, warnings=warnings)
 
     # ------------------------------------------------------------------ server-mode entry points (judge / write Job)
     def search_similar_cases(self, state: CaseState, events: Optional[list[str]] = None, *, progress=None) -> list[RetrievedCase]:
@@ -641,6 +778,7 @@ class MasterAccidentAgent:
             state.notes.append(f"영상 분석 실패: {decision.error}")
             return decision
         merge_video_facts(state, decision.result, threshold=self.video_agent.threshold)
+        self._refresh_fact_labels(state)
         state.video_status = decision.result.analysis_completion.status
         if decision.sweep_focus:
             # 2차 분석이 다룬 쟁점은 대화 중 다시 재분석하지 않는다 (guardrail이 history를 본다)
@@ -660,9 +798,60 @@ class MasterAccidentAgent:
             return False
         state.video_reanalysis_count += 1
         state.recheck_focus_history.append(focus)
+        before = self._confirmed_labels(state)
         merge_video_facts(state, merged, threshold=self.video_agent.threshold)
+        self._refresh_fact_labels(state)
+        # 로그용 이벤트(모델이 쓴 변경 기록)와 사용자 안내용 이벤트(슬롯에서 만든 라벨)를 나눈다 — 채팅에는 후자만 쓴다
         events.append("영상 focus 재분석 완료 [" + focus.rstrip(".").strip()[:70] + "]: " + (", ".join(merged.changes_from_previous[:3]) or "기존 결론 유지"))
+        gained = [label for label in self._confirmed_labels(state) if label not in before]
+        events.append("영상 재확인 결과: " + ("; ".join(gained[:3]) if gained else "새로 확인된 사실 없음"))
         return True
+
+    def _refresh_fact_labels(self, state: CaseState) -> None:
+        """영상 확정 사실 문장을 현황판 칩 라벨로 줄인다 (영상 결과가 바뀔 때마다). 실패하면 슬롯 칩만 남는다."""
+        from agent.presenters import slot_chips
+
+        try:
+            existing = [item["label"] for item in slot_chips(state)]
+            state.video_fact_labels = generate_fact_labels(self.text_client, state, existing_labels=existing, run_logger=self.run_logger)
+        except Exception as exc:  # noqa: BLE001
+            self.run_logger.log(agent="master_agent", task="master_fact_labels", case_id=state.case_id, extra={"error": str(exc)[:300]})
+
+    @staticmethod
+    def _confirmed_labels(state: CaseState) -> list[str]:
+        """영상에서 확정된 사실의 짧은 라벨 목록 (사건 현황판 슬롯 칩과 같은 규칙). 모델이 쓴 자유 문장·LLM 라벨은 쓰지 않는다 —
+        재분석 전후 비교에 LLM 라벨을 넣으면 표현만 바뀐 것이 '새로 확인된 점'으로 보인다."""
+        from agent.presenters import slot_chips
+
+        return [item["label"] for item in slot_chips(state)]
+
+    def _try_register_opponent(self, state: CaseState, events: list[str], *, progress=None, user_note: str = "") -> bool:
+        """상대 차량이 차량 목록에 없을 때 사용자에게 묻기 전에(또는 사용자 확인을 들고) 영상 agent 가 그 차량을 찾아 등록한다.
+
+        진입 방향·진행 경로 같은 사고 정황은 영상 agent 의 몫이지 사용자에게 물을 것이 아니다. critical 재분석 예산(기본 1회)을 쓴다."""
+        video = state.video_analysis
+        if not video or not state.video_path or len(video.vehicles) >= 2:
+            return False  # 목록에 두 대 이상 있으면 '누가 부딪혔는지'의 문제라 여기서 다루지 않는다 (사용자 확인 질문으로)
+        if state.critical_recheck_count >= self.max_critical_rechecks:
+            return False
+        candidate = _opponent_candidate_from_text(video)
+        parts: list[str] = []
+        if user_note and candidate:
+            parts.append(f"사용자가 상대 차량이 {candidate}가 맞다고 확인함.")
+        parts.append(
+            f"요약·서술에 '{candidate}'(으)로 적힌 상대 차량이 차량 목록(vehicles)에 없다." if candidate else "충돌 상대 차량이 차량 목록(vehicles)에 없다."
+        )
+        parts.append("충돌 직전 구간을 다시 보고 그 차량을 목록에 id·설명과 함께 등록하고 collision_pair 를 확정하라. 상대 차량의 진입 방향(좌/우/맞은편)·진행·충돌 부위도 기록하라.")
+        if user_note:
+            parts.append(f"사용자 진술: {user_note.strip()[:120]}")
+        events.append("상대 차량 미등록 → 영상 agent 재확인")
+        if not self._recheck_video(state, " ".join(parts), progress=progress, events=events):
+            return False
+        state.critical_recheck_count += 1
+        video = state.video_analysis
+        resolved = bool(video) and len(video.vehicles) >= 2 and len(video.collision_pair.participants) == 2
+        events.append("상대 차량 등록 " + ("성공" if resolved else "실패 → 사용자 확인"))
+        return resolved
 
     def _apply_agent_rechecks(self, state: CaseState, rechecks, events: list[str], progress=None) -> bool:
         """Agent가 요청한 영상 재분석 쟁점을 (예산 안에서) 수행한다. 한 턴에 하나."""
@@ -685,27 +874,36 @@ class MasterAccidentAgent:
         kept = [item for item in sentences if not re.search(r"(다시\s*(확인|분석)|재분석|재확인)", item)]
         return " ".join(kept).strip()
 
+    _REQUEST_SENTENCE = re.compile(r"(알려\s*주세요|말씀해\s*주세요|답해\s*주세요|확인해\s*주세요|인가요\s*[?？]|나요\s*[?？]|까요\s*[?？]|[?？]\s*$)")
+
+    @classmethod
+    def _strip_request_sentences(cls, intro: str) -> str:
+        """안내문(intro) 안의 질문·요청 문장을 뺀다. 실제 대화에서 모델이 안내문 끝에 '…블랙박스인지 알려주세요'를 쓰고
+        바로 아래 질문 카드가 같은 것을 다시 물어 두 번 묻는 것처럼 보였다."""
+        if not intro:
+            return intro
+        sentences = re.split(r"(?<=[.!?？])\s+", intro.strip())
+        kept = [item for item in sentences if not cls._REQUEST_SENTENCE.search(item)]
+        return " ".join(kept).strip()
+
     def _recheck_note(self, events: list[str], state: CaseState) -> str:
-        """이번 턴에 영상을 다시 봤으면 한 줄로 알린다. Video Agent에 준 지시문(내부 프롬프트)은 보여주지 않고,
-        달라진 결론만 사용자 문장으로 요약한다."""
-        done = [event for event in events if event.startswith("영상 focus 재분석 완료")]
-        if not done:
+        """이번 턴에 영상을 다시 봤으면 한 줄로 알린다. Video Agent에 준 지시문이나 모델이 쓴 변경 기록(내부 표현)은
+        보여주지 않고, 슬롯에서 새로 확정된 사실의 라벨만 말한다."""
+        if not any(event.startswith("영상 focus 재분석 완료") for event in events):
             return ""
-        changes: list[str] = []
-        video = state.video_analysis
-        for item in done[:2]:
-            raw = item.split("]: ", 1)[1] if "]: " in item else ""
-            if not raw or raw == "기존 결론 유지":
-                continue
-            for piece in raw.split(", "):
-                piece = piece.strip()
-                if piece and piece != "재분석 상세 서술 보완":
-                    text = self._humanize_change(video, piece) if video is not None else piece
-                    if text and text not in changes:
-                        changes.append(text[:120])
-        if changes:
-            return "말씀해 주신 내용을 바탕으로 영상을 다시 확인했어요. 달라진 점: " + "; ".join(changes[:2]) + "."
-        return "말씀해 주신 내용을 바탕으로 영상을 다시 확인했는데, 결론은 그대로예요."
+        gained: list[str] = []
+        for event in events:
+            if event.startswith("영상 재확인 결과: "):
+                for label in event[len("영상 재확인 결과: "):].split("; "):
+                    label = label.strip()
+                    if label and label != "새로 확인된 사실 없음" and label not in gained:
+                        gained.append(label)
+        # 사용자 답변 없이 agent 가 스스로 돌린 재확인이면 '말씀해 주신 내용을 바탕으로' 라고 하지 않는다
+        agent_initiated = any(event.startswith("상대 차량 미등록") for event in events)
+        lead = "영상을 다시 확인" if agent_initiated else "말씀해 주신 내용을 바탕으로 영상을 다시 확인"
+        if gained:
+            return f"{lead}했어요. 새로 확인된 점: " + ", ".join(gained[:3]) + "."
+        return f"{lead}했는데, 결론은 그대로예요."
 
     def _sufficiency(self, state: CaseState) -> SufficiencyResult:
         # 판정이 이미 완료되어 유효하면 LLM 보강 없이 deterministic 체크만 수행한다 (턴당 호출 절감)
@@ -729,7 +927,10 @@ class MasterAccidentAgent:
         state.retrieved_cases = result.cases
         state.rag_tier = result.tier
         if result.fallback_reason:
-            note = f"유사 심의사례 없음 → 과실비율 인정기준으로 대체 ({result.fallback_reason})"
+            if result.tier == "none":
+                note = f"참고할 심의사례·인정기준 도표 없음 → 기준 없이 임시 판정 ({result.fallback_reason})"
+            else:
+                note = f"유사 심의사례 없음 → 과실비율 인정기준으로 대체 ({result.fallback_reason})"
             events.append(note)
             if note not in state.notes:
                 state.notes.append(note)
@@ -737,12 +938,19 @@ class MasterAccidentAgent:
         state.set_stage("CASE_REVIEW" if not state.case_review_done else "READY_FOR_ASSESSMENT")
         return result.cases
 
+    def _needs_rag(self, state: CaseState) -> bool:
+        # 검색을 이미 했는데 참고 기준이 없었던 사건(rag_tier == "none")은 사실이 바뀌기 전까지 다시 찾지 않는다
+        return state.assessment_invalidated or (not state.retrieved_cases and state.rag_tier != "none")
+
     def _run_assessment(self, state: CaseState, events: list[str], *, progress=None, force_provisional: bool = False) -> Optional[FaultAssessment]:
-        if not state.retrieved_cases or state.assessment_invalidated:
+        if self._needs_rag(state):
             self._run_rag(state, events, progress=progress)
         if not state.retrieved_cases:
-            events.append("유사 사례가 없어 판정을 보류")
-            return None
+            if state.rag_tier != "none":
+                events.append("유사 사례가 없어 판정을 보류")
+                return None
+            events.append("참고 기준 없음 → 일반 원칙으로 임시 판정")
+            force_provisional = True
         state.set_stage("READY_FOR_ASSESSMENT")
         assessment = assess_fault_ratio(self.text_client, state, state.retrieved_cases, run_logger=self.run_logger, force_provisional=force_provisional)
         state.fault_assessment = assessment
@@ -771,128 +979,36 @@ class MasterAccidentAgent:
             if assessment is None:
                 return None
             return self._assessment_response(state, assessment, events, warnings, intro=intro)
-        if not state.retrieved_cases or state.assessment_invalidated:
+        if self._needs_rag(state):
             self._run_rag(state, events, progress=progress)
-        if not state.retrieved_cases:
+        if not state.retrieved_cases and state.rag_tier != "none":
             events.append("유사 사례가 없어 판정을 보류")
             return None
         rejudge = state.fault_assessment is not None
         state.set_stage("READY_FOR_ASSESSMENT")
         events.append("판정 준비 완료 → 판정 요청 (재판정)" if rejudge else "판정 준비 완료 → 판정 요청")
-        body = (
-            "바뀐 내용을 반영해서 예상 과실비율을 다시 계산할게요. 잠시만 기다려 주세요."
-            if rejudge
-            else "지금까지 확인한 사실과 유사 심의사례를 종합해서 예상 과실비율을 계산할게요. 잠시만 기다려 주세요."
-        )
+        if rejudge:
+            body = "바뀐 내용을 반영해서 예상 과실비율을 다시 계산할게요. 잠시만 기다려 주세요."
+        elif not state.retrieved_cases:
+            body = (
+                "지금까지 확인한 사실과 딱 맞는 심의사례나 과실비율 인정기준 도표를 찾지 못했어요.\n"
+                "일반 원칙으로만 본 임시 예상치를 계산할게요. 잠시만 기다려 주세요."
+            )
+        elif state.rag_tier == "fault_standard":
+            # 심의사례가 없어 도표가 기준인 경우: 도표를 보여주고, 기본비율 ± 수정요소 계산으로 넘어간다
+            body = (
+                "꼭 맞는 심의사례가 없어서 과실비율 인정기준 도표를 대신 찾았어요.\n" + self._cases_block(state, compact=True)
+                + "\n이 도표의 기본 과실비율에 확인된 수정요소를 더하고 빼서 예상 과실비율을 계산할게요. 잠시만 기다려 주세요."
+            )
+        else:
+            # 사용자가 판정을 요청한 시점에 찾은 사례를 한 줄씩 보여주고 판정으로 넘어간다 (판정 카드의 '근거'에도 같은 사례가 붙는다)
+            body = (
+                "지금까지 확인한 사실로 비슷한 심의사례를 찾았어요.\n" + self._cases_block(state, compact=True)
+                + "\n이 사례들과 사고 사실을 종합해서 예상 과실비율을 계산할게요. 잠시만 기다려 주세요."
+            )
         message = (intro.strip() + "\n" if intro else "") + body
         data = {"rejudge": rejudge, "provisional": force_provisional, "similar_cases": self._similar_cases_data(state), "tier": state.rag_tier, "events": events}
         return self._respond(state, message=message, action="REQUEST_ASSESSMENT", data=data, warnings=warnings)
-
-    # ------------------------------------------------------------------ case review phase
-    def _review_step(self, state: CaseState, events: list[str], progress=None):
-        """검토 질문 생성 + Agent가 요청한 영상 재분석 수행(있으면 재생성)."""
-        summary, questions, rechecks = generate_case_review_questions(
-            self.text_client, state, state.retrieved_cases, max_questions=self.settings.agent.max_questions_per_turn, run_logger=self.run_logger
-        )
-        if rechecks and self._apply_agent_rechecks(state, rechecks, events, progress):
-            # 재분석으로 상태가 바뀌었으니 Agent가 다시 판단한다 (같은 쟁점은 recheck_history로 반복 방지)
-            unregister_questions(state, questions, review=True)
-            summary, questions, _ = generate_case_review_questions(
-                self.text_client, state, state.retrieved_cases, max_questions=self.settings.agent.max_questions_per_turn, run_logger=self.run_logger
-            )
-        return summary, questions
-
-    def _present_cases_and_review(self, state: CaseState, events: list[str], warnings: list[str], *, is_initial: bool, progress=None) -> AgentResponse:
-        summary, questions = self._review_step(state, events, progress)
-        state.set_stage("CASE_REVIEW")
-        if not questions:
-            # Agent가 더 확인할 것이 없다고 판단 → 사례를 보여주고 바로 종합 판정으로 이어간다
-            mark_review_done(state, "검토할 미확인 쟁점 없음")
-            intro = (self._video_intro(state) + "\n" if is_initial else "") + self._cases_block(state) + ("\n" + summary if summary else "")
-            intro += "\n더 확인할 게 없어서 심의사례와 사고 사실을 종합해 판정할게요." if self.defer_conclusions else "\n더 확인할 게 없어서 심의사례와 사고 사실을 종합해 판정했어요."
-            conclusion = self._conclude(state, events, warnings, intro=intro, progress=progress)
-            if conclusion is not None:
-                return conclusion
-        lines = []
-        if is_initial:
-            lines.append(self._video_intro(state))
-        else:
-            # 방금 받은 답을 먼저 받아 주고 사례로 넘어간다 (답 → 사례가 바로 붙으면 대화가 끊긴 느낌이 든다)
-            lines.append(self._review_ack(events))
-        recheck_note = self._recheck_note(events, state)
-        if recheck_note:
-            lines.append(recheck_note)
-        lines.append(self._cases_block(state))
-        if summary:
-            lines.append(summary)
-        lines.append("아직 과실비율을 판정하지 않았어요. 판정 전에 한 가지만 확인할게요." if len(questions) == 1 else "아직 과실비율을 판정하지 않았어요. 판정 전에 몇 가지만 더 확인할게요.")
-        lines.append(format_questions("", questions))
-        data = {
-            "similar_cases": self._similar_cases_data(state),
-            "tier": state.rag_tier,
-            "review_summary": summary,
-            "questions": [q.model_dump() for q in questions],
-            "agent_reasoning": questions[0].reasoning if questions else [],
-            "video_summary": self._video_summary_data(state) if is_initial else None,
-        }
-        return self._respond(state, message="\n".join(line for line in lines if line), action="SHOW_SIMILAR_CASES", data=data, warnings=warnings)
-
-    def _continue_case_review(
-        self,
-        state: CaseState,
-        *,
-        message: str,
-        intent: IntentResult,
-        events: list[str],
-        answered_fields: set[str],
-        sufficiency: SufficiencyResult,
-        warnings: list[str],
-        progress=None,
-    ) -> Optional[AgentResponse]:
-        remaining = review_questions_remaining(state)
-        answered_now = bool(answered_fields) or any(event.startswith("새 사실 반영") for event in events)
-        # '추가 정황 있나요?' 같은 열린 질문은 새 사실이 있거나 부정 답변이면 답한 것으로 본다
-        if remaining and all(item.field == ADDITIONAL_FACTS_FIELD for item in remaining):
-            if answered_now or _NEGATIVE_ANSWER.search(message):
-                state.review_answers[ADDITIONAL_FACTS_FIELD] = "provided" if answered_now else "none"
-                state.pending_questions = [item for item in state.pending_questions if item.field != ADDITIONAL_FACTS_FIELD]
-                remaining = []
-
-        if remaining and intent.primary_intent in {"general_question", "ask_explanation", "provide_opponent_claim"}:
-            # 사용자의 질문에 먼저 답하고, 남은 확인 질문을 다시 붙인다
-            answer = self._answer(state, message=message, intent=intent, events=events, warnings=warnings, is_initial=False, respond=False)
-            for item in remaining:
-                item.ask_count += 1
-                item.asked_turn = state.turn_count
-            text = answer + "\n\n아직 확인이 필요한 게 남아 있어요.\n" + format_questions("", remaining)
-            return self._respond(state, message=text, action="ASK_USER", data={"questions": [q.model_dump() for q in remaining], "review": True}, warnings=warnings)
-
-        if remaining:
-            for item in remaining:
-                item.ask_count += 1
-                item.asked_turn = state.turn_count
-            prefix = "확인했어요. " if answered_now else "답변을 확인하지 못해서 다시 여쭤볼게요. 모르시면 '모름'이라고 답해 주셔도 돼요. "
-            text = prefix + "\n" + format_questions("", remaining)
-            return self._respond(state, message=text, action="ASK_USER", data={"questions": [q.model_dump() for q in remaining], "review": True}, warnings=warnings)
-
-        # 답을 받았으면 Agent가 다음으로 확인할 사실이 더 있는지 스스로 판단한다 (한 턴에 한 질문, 최대 max_review_rounds회)
-        if state.review_rounds < self.settings.agent.max_review_rounds:
-            summary, questions = self._review_step(state, events, progress)
-            if questions:
-                prefix = "확인했어요. " if answered_now else ""
-                recheck_note = self._recheck_note(events, state)
-                text = prefix + (recheck_note + "\n" if recheck_note else "") + "판정 전에 한 가지만 더 확인할게요.\n" + format_questions("", questions)
-                return self._respond(state, message=text, action="ASK_USER", data={"questions": [q.model_dump() for q in questions], "agent_reasoning": questions[0].reasoning, "review": True, "review_summary": summary}, warnings=warnings)
-
-        # 검토 완료 → Agent가 판정 준비 완료를 판단하고 종합 판정
-        mark_review_done(state, "검토 질문 확인 완료")
-        events.append("심의사례 검토 완료 → 종합 판정")
-        recheck_note = self._recheck_note(events, state)
-        intro = (recheck_note + "\n" if recheck_note else "") + (
-            "확인해 주신 내용과 유사 심의사례를 종합해서 예상 과실비율을 판정할게요." if self.defer_conclusions
-            else "확인해 주신 내용과 유사 심의사례를 종합해서 예상 과실비율을 판정했어요."
-        )
-        return self._conclude(state, events, warnings, intro=intro, force_provisional=not sufficiency.ready_for_assessment, progress=progress)
 
     # ------------------------------------------------------------------ responses
     def _respond(self, state: CaseState, *, message: str, action: Action, data: Optional[dict] = None, warnings: Optional[list[str]] = None) -> AgentResponse:
@@ -906,17 +1022,19 @@ class MasterAccidentAgent:
         # 영상 모델이 쓴 요약에는 vehicle_1 같은 내부 ID가 섞여 있다 → 사용자에게는 차량 설명으로 바꿔 보여준다
         summary = self._humanize_vehicle_ids(video, video.short_summary.strip()) or "영상 분석을 마쳤어요."
         names = self._vehicle_names(video)
-        vehicles = ", ".join(("블랙박스 차량(자차)" if v.is_ego else names[v.id]) for v in video.vehicles)
+        # 촬영 차량이 사용자 차량인지(자차)는 아직 물어보기 전이므로 단정하지 않는다 → '블랙박스 촬영 차량'
+        others = [names[v.id] for v in video.vehicles if not v.is_ego]
+        vehicles_text = ""
+        if others:
+            vehicles_text = " 영상에서 확인된 차량: 블랙박스 촬영 차량, " + ", ".join(others) + "."
         pair = video.collision_pair
         pair_text = ""
         if len(pair.participants) == 2:
             first, second = (names.get(pid, pid) for pid in pair.participants)
             pair_text = f" 충돌한 두 차량은 {first}과(와) {second}로 보여요(신뢰도 {pair.confidence:.2f})."
-        second_pass = ""
-        changes = self._second_pass_changes(video)
-        if len(video.analysis_passes) >= 2 and changes:
-            second_pass = " 2차 분석에서 보완된 내용: " + "; ".join(changes) + "."
-        return f"영상을 분석했어요. {summary} 영상에서 확인된 차량: {vehicles or '없음'}.{pair_text}{second_pass}"
+        # 2차 분석의 변경 기록(changes_from_previous)은 모델이 쓴 내부 표현이라 채팅에 싣지 않는다 (로그·events 에만 남는다).
+        # 2차 분석으로 확정된 사실은 요약·확인된 사실 칩·질문에 이미 반영돼 있다.
+        return f"영상을 분석했어요. {summary}{vehicles_text}{pair_text}"
 
     @staticmethod
     def _vehicle_names(video: VideoResult) -> dict[str, str]:
@@ -979,21 +1097,6 @@ class MasterAccidentAgent:
         text = re.sub(r"\bcollision pair\b", "충돌 차량 조합", text)
         return re.sub(r"\s{2,}", " ", text).strip(" ;,")
 
-    @classmethod
-    def _with_second_pass_note(cls, state: CaseState, text: str) -> str:
-        """첫 턴 메시지에 2차 영상 분석이 보완한 내용을 한 줄 덧붙인다 (LLM이 intro를 썼을 때도)."""
-        video = state.video_analysis
-        if video is None or len(video.analysis_passes) < 2 or "2차 분석에서 보완" in text:
-            return text
-        changes = cls._second_pass_changes(video)
-        if not changes:
-            return text
-        note = "2차 분석에서 보완된 내용: " + "; ".join(changes) + "."
-        lines = text.split("\n", 1)
-        if len(lines) == 2:
-            return lines[0] + "\n" + note + "\n" + lines[1]
-        return note + "\n" + text
-
     def _video_summary_data(self, state: CaseState) -> Optional[dict]:
         video = state.video_analysis
         if video is None:
@@ -1015,32 +1118,30 @@ class MasterAccidentAgent:
             for item in state.retrieved_cases[: self.settings.rag.final_top_k]
         ]
 
-    def _cases_block(self, state: CaseState) -> str:
+    def _cases_block(self, state: CaseState, *, compact: bool = False) -> str:
+        """검색된 심의사례 목록. compact=True 면 사례마다 한 줄(판정 직전 안내용), 아니면 공통점·차이점까지."""
         top_k = self.settings.rag.final_top_k
+        if state.rag_tier == "none":
+            return "현재 사고 구조와 맞는 심의사례나 과실비율 인정기준 도표를 찾지 못했어요."
         if state.rag_tier == "fault_standard":
-            lines = ["현재 사고 구조와 맞는 심의사례가 없어서 과실비율 인정기준 도표를 대신 찾았어요."]
+            lines = ["현재 사고 구조와 맞는 심의사례가 없어서 과실비율 인정기준 도표를 대신 찾았어요."] if not compact else []
         else:
-            lines = [f"현재 사건과 비슷한 심의사례예요 (최대 {top_k}개)."]
+            lines = [f"현재 사건과 비슷한 심의사례예요 (최대 {top_k}개)."] if not compact else []
         for case in state.retrieved_cases[:top_k]:
             rel = case.relevance
-            lines.append(f"- {case.case_id} {case.title or ''} · {case.ratio_summary()}".rstrip())
+            if case.source_type != "deliberation_case" and (case.role_a or case.role_b):
+                lines.append(f"- 도표 {case.case_id} {case.title or ''} · A {case.role_a or '?'} / B {case.role_b or '?'} · {case.ratio_summary()}".rstrip())
+            else:
+                lines.append(f"- {case.case_id} {case.title or ''} · {case.ratio_summary()}".rstrip())
+            if compact:
+                continue
             if rel and rel.matched_factors:
                 lines.append(f"  공통점: {', '.join(rel.matched_factors[:3])}")
             if rel and rel.different_factors:
                 lines.append(f"  차이점: {', '.join(rel.different_factors[:2])}")
-        lines.append("심의사례의 사실관계는 현재 사건과 다를 수 있어서, 차이점을 함께 살펴볼게요.")
+        if not compact:
+            lines.append("심의사례의 사실관계는 현재 사건과 다를 수 있어서, 차이점을 함께 살펴볼게요.")
         return "\n".join(lines)
-
-    @staticmethod
-    def _review_ack(events: list[str]) -> str:
-        """답변 직후 사례를 보여줄 때 붙이는 연결 문장."""
-        unknown = [event for event in events if event.startswith("사용자가 모른다고 답함")]
-        added = [event for event in events if event.startswith("새 사실 반영")]
-        if unknown and not added:
-            return "확인했어요. 기억나지 않는 부분은 '확인되지 않음'으로 두고 진행할게요. 지금까지 확인된 내용으로 비슷한 심의사례를 찾아봤어요."
-        if added:
-            return "확인했어요. 말씀해 주신 내용을 반영해서 비슷한 심의사례를 찾아봤어요."
-        return "확인했어요. 지금까지 확인된 내용으로 비슷한 심의사례를 찾아봤어요."
 
     def _ack(self, events: list[str], is_initial: bool, state: CaseState) -> str:
         if is_initial:
@@ -1048,12 +1149,41 @@ class MasterAccidentAgent:
         facts = [event for event in events if event.startswith("새 사실 반영")]
         conflicts = [event for event in events if event.startswith("영상과 충돌")]
         parts = []
-        if facts:
+        claim_ack = self._claim_ack(state, events)
+        if claim_ack:
+            parts.append(claim_ack)
+        elif facts:
             parts.append("확인했어요.")
         if conflicts:
             parts.append("일부 말씀은 영상에서 직접 확인되지 않아서 진술로만 기록해 두었어요.")
         parts.append("한 가지만 더 확인할게요.")
         return " ".join(parts)
+
+    @staticmethod
+    def _claim_ack(state: CaseState, events: list[str]) -> str:
+        """이번 턴에 상대 보험사 주장 비율이 새로 기록됐으면 그 사실을 한 문장으로 확인해 준다 (판정 전에는 비교 대상일 뿐 판정이 아니다)."""
+        if not any(event.startswith("상대 보험사 주장 기록") for event in events):
+            return ""
+        from agent.presenters import parse_opponent_claim, ratio_text
+
+        claim = parse_opponent_claim(state.opponent_claim)
+        if claim:
+            return f"상대 보험사 주장({ratio_text(claim['mine'], claim['other'])})은 기록해 두었다가 판정 카드에서 비교해 드릴게요."
+        return "상대 보험사 주장은 기록해 두었어요."
+
+    _RATIO_MENTION = re.compile(r"\d{1,3}\s*[:：대]\s*\d{1,3}|\d{1,3}\s*%|앞서\s*(?:말씀|안내|제시)")
+
+    @classmethod
+    def _scrub_unfounded_ratio(cls, state: CaseState, text: str) -> str:
+        """판정이 아직 없는 사건에서 자유 답변이 비율 숫자를 말하면 그 문장을 뺀다.
+
+        실제 웹 대화에서 respond 모델이 프롬프트 예시 문장("앞서 말씀드린 예상 과실비율 30:70")을 그대로 베껴
+        존재하지 않는 판정을 언급한 일이 있었다. 사용자가 전한 상대 보험사 주장을 옮기는 문장('주장')은 남긴다."""
+        if not text or state.fault_assessment is not None:
+            return text
+        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+        kept = [item for item in sentences if not (cls._RATIO_MENTION.search(item) and "주장" not in item) and not re.search(r"앞서\s*(?:말씀|안내|제시)", item)]
+        return " ".join(kept).strip()
 
     def _not_ready_message(self, sufficiency: SufficiencyResult) -> str:
         missing = ", ".join(item.reason or item.field for item in sufficiency.sorted_missing()[:3])
@@ -1065,18 +1195,26 @@ class MasterAccidentAgent:
             lines.append(intro)
         label = "임시 예상" if assessment.assessment_type == "provisional" else "예상"
         lines.append(f"영상과 확인된 사실, 유사 심의사례를 기준으로 보면 {label} 과실비율은 나 {assessment.fault_ratio.user} : 상대 {assessment.fault_ratio.opponent} 정도예요. (신뢰도 {assessment.confidence:.2f})")
+        chart_based = state.rag_tier == "fault_standard"
         if assessment.anchor_case_id:
-            anchor_line = f"기준 심의사례: {assessment.anchor_case_id} (결정비율 {assessment.anchor_ratio})"
+            if chart_based:
+                anchor_line = f"기준 인정기준 도표: {assessment.anchor_case_id} (기본비율 나 {assessment.anchor_ratio})"
+            else:
+                anchor_line = f"기준 심의사례: {assessment.anchor_case_id} (결정비율 {assessment.anchor_ratio})"
             if assessment.anchor_enforced:
                 anchor_line += " — 확인된 수정요소가 없어서 기준값을 그대로 적용했어요"
             lines.append(anchor_line)
+        if assessment.calculation:
+            lines.append(f"계산: {assessment.calculation}")
         if assessment.possible_range:
             lines.append(f"예상 범위: {' ~ '.join(assessment.possible_range)}")
         primary = [item for item in assessment.matched_cases if item.case_id in assessment.primary_case_ids] or assessment.matched_cases[:1]
         if primary:
-            lines.append("참고 심의사례: " + ", ".join(f"{item.case_id}({item.decision_ratio or item.basic_ratio or '비율 미상'})" for item in primary))
-        if state.rag_tier == "fault_standard":
-            lines.append("참고: 현재 사고 구조와 맞는 심의사례가 없어서 과실비율 인정기준 도표를 근거로 계산했어요.")
+            lines.append(("참고 도표: " if chart_based else "참고 심의사례: ") + ", ".join(f"{item.case_id}({item.decision_ratio or item.basic_ratio or '비율 미상'})" for item in primary))
+        if chart_based:
+            lines.append("참고: 현재 사고 구조와 맞는 심의사례가 없어서 과실비율 인정기준 도표의 기본비율에 확인된 수정요소를 더하고 빼서 계산했어요.")
+        elif state.rag_tier == "none":
+            lines.append("참고: 꼭 맞는 심의사례나 인정기준 도표를 찾지 못해서 일반 원칙으로만 본 임시 예상치예요.")
         if assessment.reasoning_summary:
             lines.append("근거:\n" + "\n".join(f"- {item}" for item in assessment.reasoning_summary[:6]))
         if assessment.adjustment_factors:
@@ -1094,9 +1232,6 @@ class MasterAccidentAgent:
         if not state.retrieved_cases:
             return self._respond(state, message="현재 사건 구조로 찾은 유사 심의사례가 아직 없어요. 사고 장소와 진행 방향이 더 확인되면 다시 찾아볼게요.", action="INFO", warnings=warnings)
         message = self._cases_block(state)
-        remaining = review_questions_remaining(state) if not state.case_review_done else []
-        if remaining:
-            message += "\n\n판정 전에 확인이 필요한 내용이에요.\n" + format_questions("", remaining)
         data = {"similar_cases": [case.model_dump(exclude={"excerpt"}) for case in state.retrieved_cases[: self.settings.rag.final_top_k]], "tier": state.rag_tier, "query": state.rag_query.model_dump() if state.rag_query else None}
         return self._respond(state, message=message, action="SHOW_SIMILAR_CASES", data=data, warnings=warnings)
 
@@ -1145,6 +1280,9 @@ class MasterAccidentAgent:
                                     prompt_version=f"{system.version_id}+{task.version_id}", metrics=response.metrics)
             except Exception as exc:  # noqa: BLE001
                 self.run_logger.log(agent="master_agent", task=task.task, case_id=state.case_id, extra={"error": str(exc)[:300]})
+            # guardrail: 하지 않은 재분석 약속, 없는 판정의 비율 숫자는 모델이 써도 사용자에게 내보내지 않는다
+            text = self._strip_unfulfilled_recheck_promise(text, events)
+            text = self._scrub_unfounded_ratio(state, text)
         if not text:
             text = self._deterministic_answer(state, intent, events, is_initial)
         if not respond:

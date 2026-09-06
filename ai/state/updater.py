@@ -601,7 +601,10 @@ def apply_user_extraction(
         claim = extraction.opponent_claim.strip()
         if claim and claim != state.opponent_claim:
             state.opponent_claim = claim if not state.opponent_claim else f"{state.opponent_claim}\n{claim}"
-            state.facts.append(Fact(fact=f"상대방 주장: {claim}", source="user", status="INFERRED", field="opponent_claim", value=claim, turn=turn))
+            claim_fact = Fact(fact=f"상대방 주장: {claim}", source="user", status="INFERRED", field="opponent_claim", value=claim, turn=turn)
+            state.facts.append(claim_fact)
+            # 열린 질문("추가로 알려주실 정황이 있나요?")에 상대 주장으로 답한 것도 '새 사실'이다 — 무응답으로 보고 되묻지 않게 added 에 넣는다
+            added.append(claim_fact)
 
     if owner_changed and not any(item.field in {"ego_vehicle.vehicle_id", "other_vehicle.vehicle_id"} for item in extraction.new_facts):
         remap_vehicles_by_owner(state)

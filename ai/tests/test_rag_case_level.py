@@ -214,8 +214,10 @@ def test_tool_uses_reranker_relevance_as_acceptance_when_llm_available(tmp_path)
 
     tool = _tool(index_dir, LowRelevanceClient(), run_logger=quiet_logger(tmp_path), min_case_relevance=0.5)
     result = tool.search(CaseState(), query=RagQuery(structured_query="사거리 교차로 직진 대 직진", detailed_query="사거리 직진"))
-    assert result.tier == "fault_standard"
-    assert "검증 기준" in result.fallback_reason
+    # 심의사례도, 인정기준 도표도 검증을 넘지 못하면 엉뚱한 표를 기준값으로 잡지 않고 '참고 기준 없음'으로 끝낸다
+    assert result.tier == "none"
+    assert result.cases == []
+    assert "검증 기준" in result.fallback_reason and "도표" in result.fallback_reason
 
     tool_ok = _tool(index_dir, FakeTextClient(), run_logger=quiet_logger(tmp_path))
     result_ok = tool_ok.search(CaseState(), query=RagQuery(structured_query="사거리 교차로 직진 대 직진", detailed_query="사거리 직진"))

@@ -35,13 +35,7 @@ DEFAULT_DPI = 120
 _IMAGE_UNIT_TYPES = {"case", "standard_chart", "roundabout_chart"}
 
 
-@dataclass
-class Word:
-    text: str
-    x0: float
-    y0: float
-    x1: float
-    y1: float
+from rag.pdf_words import Word, page_words, parse_bbox_xml  # noqa: E402  (그림·표 재구성이 같은 좌표 읽기를 쓴다)
 
 
 @dataclass
@@ -121,31 +115,6 @@ def resolve_pdf(unit: ImageUnit, pdf_dir: Path = DEFAULT_PDF_DIR) -> Optional[Pa
 
 
 # ----------------------------------------------------------------------------- 좌표 찾기
-
-
-_PAGE_RE = re.compile(r'<page\s+width="([\d.]+)"\s+height="([\d.]+)"')
-_WORD_RE = re.compile(r'<word\s+xMin="([\d.]+)"\s+yMin="([\d.]+)"\s+xMax="([\d.]+)"\s+yMax="([\d.]+)"\s*>(.*?)</word>', re.S)
-
-
-def parse_bbox_xml(xml_text: str) -> tuple[float, float, list[Word]]:
-    """pdftotext -bbox-layout 출력은 특수문자 때문에 XML 파서가 깨질 수 있어 정규식으로 읽는다."""
-    page = _PAGE_RE.search(xml_text)
-    if page is None:
-        raise ValueError("bbox 출력에 page 가 없다")
-    width, height = float(page.group(1)), float(page.group(2))
-    words = [
-        Word(text=html.unescape(match.group(5)).strip(), x0=float(match.group(1)), y0=float(match.group(2)), x1=float(match.group(3)), y1=float(match.group(4)))
-        for match in _WORD_RE.finditer(xml_text)
-    ]
-    return width, height, words
-
-
-def page_words(pdf: Path, page: int) -> tuple[float, float, list[Word]]:
-    result = subprocess.run(
-        ["pdftotext", "-f", str(page), "-l", str(page), "-bbox-layout", str(pdf), "-"],
-        capture_output=True, text=True, check=True,
-    )
-    return parse_bbox_xml(result.stdout)
 
 
 def _label(words: list[Word], first: str, second: Optional[str] = None, *, after_y: float = -1.0) -> Optional[Word]:

@@ -21,6 +21,12 @@ def main():
         force=args.force,
         progress=print,
     )
+    # 사례 단위 문서(case_documents.jsonl)는 parents 에서 파생된다. 인덱스를 새로 만들면 같이 다시 만들어야
+    # 예전 추출 결과가 남지 않는다 (load_case_documents 는 파일이 없을 때만 만든다).
+    from rag.case_documents import build_case_documents
+
+    documents = build_case_documents(directory)
+    print(f"사례 문서 재생성: {len(documents)}건 → {Path(directory) / 'case_documents.jsonl'}")
     print(f"RAG 인덱스 위치: {directory}")
 
 

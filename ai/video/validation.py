@@ -227,6 +227,17 @@ def factor_coverage(result: VideoResult) -> tuple[float, list[str], str]:
     return coverage, missing, profile
 
 
+_STRUCTURE_FAILURES = {"vehicle_inventory_empty", "collision_participants_not_identified", "collision_participants_duplicate", "collision_participants_not_in_inventory"}
+
+
+def focus_pass_usable(result: VideoResult) -> bool:
+    """focus 재분석 응답이 병합할 만한지 — 차량 목록과 충돌 pair 구조가 있는지만 본다 (신뢰도는 따지지 않는다).
+
+    모델이 가끔 요약문만 쓰고 vehicles·collision_pair 를 비운 채 돌려준다. 그런 응답을 병합하면 빈 값이 캐시되고
+    확정 관찰이 섞여 들어가므로, 기준 결과가 멀쩡할 때는 이런 응답을 버리고 다시 묻는다."""
+    return not (_STRUCTURE_FAILURES & set(participant_check(result, threshold=0.0)))
+
+
 def validate_video_result(result: VideoResult, threshold: float = 0.80) -> tuple[bool, list[str]]:
     """가이드 53절 Fast Path 검증. 충돌 pair·identity가 핵심이다."""
     reasons = participant_check(result, threshold)
@@ -453,8 +464,38 @@ def should_use_cv_tracking(result: VideoResult, threshold: float = 0.80) -> bool
 
 
 _OPPONENT_CANDIDATE = re.compile(
-    r"([가-힣A-Za-z]{1,6}(?:색)?\s?(?:승용차|승합차|SUV|트럭|화물차|버스|택시|오토바이|이륜차|경차|차량))\s*\((vehicle_\d+)\)"
+    r"([가-힣A-Za-z]{1,6}(?:색)?\s?(?:승용차|승합차|세단|SUV|트럭|화물차|버스|택시|오토바이|이륜차|경차|차량))\s*\((vehicle_\d+)\)"
 )
+
+
+def reconcile_vehicle_inventory(result: VideoResult) -> list[str]:
+    """요약·서술에 'ID 와 함께' 적힌 차량("흰색 세단(vehicle_2)")이 vehicles 목록에 없으면 목록에 넣는다.
+
+    모델이 서술에는 상대 차량을 쓰고 목록에는 빠뜨리는 형식 누락 때문에 '상대 차량 미확정'으로 사용자에게 되묻거나
+    영상을 한 번 더 돌리는 일이 있었다. 같은 결과 안에서의 보정이므로 추가 호출이 없다. 충돌 상대가 비어 있고
+    촬영 차량 외 차량이 하나뿐이며 요약이 그 차량과의 충돌을 말하면 collision_pair 도 채운다. 추가한 ID 목록을 돌려준다."""
+    from video.schemas import VehicleEntry
+
+    ego = result.ego_vehicle_id or result.dashcam_vehicle_id() or "vehicle_1"
+    known = {vehicle.id for vehicle in result.vehicles}
+    added: list[str] = []
+    for text in (result.short_summary or "", result.detailed_description or ""):
+        for match in _OPPONENT_CANDIDATE.finditer(text):
+            desc, vehicle_id = match.group(1).strip(), match.group(2)
+            if vehicle_id in known or vehicle_id == ego or "블랙박스" in desc:
+                continue
+            result.vehicles.append(VehicleEntry(id=vehicle_id, description=desc))
+            known.add(vehicle_id)
+            added.append(vehicle_id)
+    if added and len(result.collision_pair.participants) < 2:
+        others = [vehicle for vehicle in result.vehicles if not vehicle.is_ego and vehicle.id != ego]
+        if len(others) == 1 and re.search(r"충돌|충격|접촉", result.short_summary or ""):
+            result.collision_pair.participants = [ego, others[0].id]
+            result.collision_pair.confidence = max(result.collision_pair.confidence, 0.8)
+            result.collision_pair.reasoning.append(f"요약에 충돌 상대로 기재된 {others[0].id}({others[0].description})를 차량 목록에 보정 등록")
+    if added:
+        result.changes_from_previous.append("차량 목록 보정: " + ", ".join(added))
+    return added
 
 
 def _opponent_candidate_from_text(result: VideoResult) -> str:
@@ -484,15 +525,16 @@ def user_confirmation_question(result: VideoResult) -> str:
     if count < 2:
         # 상대 차량 자체를 목록(inventory)에 넣지 못한 경우. 요약문에는 "흰색 승용차(vehicle_2)"처럼 상대 차량이
         # 적혀 있을 수 있으므로, 그 후보를 인용해 "찾지 못했다"는 모순된 말을 피한다.
+        # 진입 방향 같은 사고 정황은 영상 agent 가 판단할 몫이다 → 사용자에게는 상대 차량이 어느 차량인지만 확인한다
         candidate = _opponent_candidate_from_text(result)
         if candidate:
             return (
                 f"영상 설명에서는 상대 차량이 {candidate}로 보이지만, 차량 목록에서 확정하지는 못했어요. "
-                f"상대 차량이 {candidate}가 맞나요? 어느 쪽(좌/우/앞/뒤)에서 왔는지도 알려주시면 그 정보로 영상을 다시 확인할게요."
+                f"상대 차량이 {candidate}가 맞나요? 맞다고 하시면 그 차량을 기준으로 영상을 다시 확인할게요."
             )
         return (
             "영상 분석에서 상대 차량을 확정하지 못했어요. "
-            "상대 차량이 어느 쪽(좌/우/앞/뒤)에서 온 어떤 차량(색상·차종)이었는지 알려주시면 그 정보로 영상을 다시 확인할게요."
+            "상대 차량이 어떤 차량(색상·차종)이었는지 알려주시면 영상에서 그 차량을 찾아 다시 확인할게요."
         )
     lines = [f"영상에서 차량이 {count}대 보여요."]
     if len(participants) == 2:

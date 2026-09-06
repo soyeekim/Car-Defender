@@ -625,7 +625,8 @@ class GeminiVideoClient:
             text = response.text or ""
             try:
                 parsed = getattr(response, "parsed", None)
-                raw = parsed if isinstance(parsed, dict) else parse_json_object(text)
+                # 본문 중간에서 깨진 JSON 은 '잘린 출력'으로 살리지 않고 repair 로 보낸다 (뒤쪽 필드가 통째로 사라지기 때문)
+                raw = parsed if isinstance(parsed, dict) else parse_json_object(text, truncated_only=True)
                 data = validate_against(schema, raw)
                 mode = "response_json_schema" if use_schema else "prompt_schema"
             except (ValueError, ValidationError, json.JSONDecodeError) as exc:
@@ -651,15 +652,25 @@ class GeminiVideoClient:
                     ),
                 )
                 attempts += 1
-                text = response.text or ""
+                first_text, text = text, response.text or ""
                 try:
-                    data = validate_against(schema, parse_json_object(text))
+                    data = validate_against(schema, parse_json_object(text, truncated_only=True))
+                    mode = "prompt_schema+repair"
                 except (ValueError, ValidationError, json.JSONDecodeError) as repair_exc:
                     dump_path = _dump_raw_response(text, tag="gemini_repair")
-                    raise RuntimeError(
-                        f"Gemini 영상 분석 출력을 repair 후에도 파싱하지 못했습니다: {str(repair_exc)[:200]} (원문: {dump_path})"
-                    ) from repair_exc
-                mode = "prompt_schema+repair"
+                    # 마지막 수단: 두 응답 중 하나라도 관대한 파싱(잘린 꼬리 닫기)으로 살아나면 그것을 쓴다 — 아무것도 없는 것보다는 낫다
+                    data = None
+                    for candidate in (text, first_text):
+                        try:
+                            data = validate_against(schema, parse_json_object(candidate))
+                            break
+                        except (ValueError, ValidationError, json.JSONDecodeError):
+                            continue
+                    if data is None:
+                        raise RuntimeError(
+                            f"Gemini 영상 분석 출력을 repair 후에도 파싱하지 못했습니다: {str(repair_exc)[:200]} (원문: {dump_path})"
+                        ) from repair_exc
+                    mode = "prompt_schema+repair+lenient"
             prompt_tokens, completion_tokens, total_tokens = self._usage(response)
             return JSONResponse(
                 data=data,
