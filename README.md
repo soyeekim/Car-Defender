@@ -8,13 +8,16 @@
        width="100%" />
 </p>
 
-Car Defender(카-디펜더)는 교통사고 이후 필요한 정보 확인과 대응 과정을 하나의 대화형 서비스로 연결합니다. 역할별 AI Agent가 협업하여 사고 영상을 분석하고, 관련 근거를 탐색하며, 사용자의 사고 대응을 지원합니다.
+Car Defender(카-디펜더)는 교통사고 이후 필요한 정보 확인과 대응 과정을 하나의 대화형 서비스로 연결합니다.
+역할별 AI Agent가 협업하여 사고 영상을 분석하고, 관련 근거를 탐색하며, 사용자의 사고 대응을 지원합니다.
 
 <p align="center">
   <img src="./assets/readme/fairway_result.png"
        alt="FAIRWAY 판정카드"
        width="50%" />
 </p>
+
+<br />
 
 ## ✨ 핵심 기능
 
@@ -27,6 +30,8 @@ Car Defender(카-디펜더)는 교통사고 이후 필요한 정보 확인과 �
 | 보험 대응 문서 | 사건경위서 · 반박의견서 · PDF |
 | 사건 관리 | 사건별 진행 상태 · 실시간 알림 · 기록 관리 |
 
+<br />
+
 ## 🤖 AI Agent
 
 Car Defender는 하나의 AI 모델에 모든 작업을 맡기지 않고, 각 영역에 특화된 Agent가 협업하는 구조로 설계했습니다.
@@ -38,6 +43,8 @@ Car Defender는 하나의 AI 모델에 모든 작업을 맡기지 않고, 각 �
 
 `Multi-Agent` · `Agent Orchestration` · `Multimodal AI` · `RAG` · `Prompt Engineering` · `Structured Output` · `Guardrail`
 
+<br />
+
 ## 🔄 서비스 흐름
 
 <p align="center">
@@ -47,6 +54,8 @@ Car Defender는 하나의 AI 모델에 모든 작업을 맡기지 않고, 각 �
   <strong>근거 검색 및 결과 제공</strong> →
   <strong>보험 대응 문서 생성</strong>
 </p>
+
+<br />
 
 ## 🛠️ 기술 스택
 
@@ -61,6 +70,8 @@ Car Defender는 하나의 AI 모델에 모든 작업을 맡기지 않고, 각 �
 | Infra | Docker · Nginx · AWS EC2 |
 | Test | pytest · Ruff |
 
+<br />
+
 ## 📁 프로젝트 구성
 
 ```text
@@ -69,6 +80,8 @@ Car-Defender/
 ├── server/   # API · 데이터 · 인증 · 실시간 처리
 └── design/   # UI · 디자인 시스템 · 서비스 명세
 ```
+
+<br />
 
 ## 🎯 기대 효과
 
